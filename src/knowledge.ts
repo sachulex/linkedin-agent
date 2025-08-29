@@ -244,3 +244,21 @@ res.json({ text: out, knowledge_version: version });
 });
 
 export default router;
+
+
+export async function getKnowledgeForAgent(select: string[] = ["brand","company","design"]) {
+  const r = await query<{ version: number; checksum: string; data: any }>(
+    "select version, checksum, data from knowledge_state order by version desc limit 1",
+    []
+  );
+  const row = (r as any).rows?.[0] || { version: 0, checksum: "", data: {} };
+  const data = row.data || {};
+  const packs: any = {};
+  for (const ns of select) {
+    if (ns === "brand") packs.brand = { rules: data.brand?.voice_rules || {}, structure: data.brand?.post_structure || {} };
+    else if (ns === "design") packs.design = { image: data.design?.image_style || {} };
+    else if (ns === "company") packs.company = data.company || {};
+    else packs[ns] = data[ns] || {};
+  }
+  return { version: row.version, checksum: row.checksum, packs };
+}
