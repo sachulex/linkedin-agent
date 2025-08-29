@@ -74,3 +74,4 @@ router.post("/v1/knowledge", (req: Request, res: Response) => {
 });
 
 export default router;
+// redeploy trigger Fri Aug 29 13:30:21 IDT 2025
