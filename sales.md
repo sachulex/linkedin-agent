@@ -1,15 +1,15 @@
-**Why Switch to Bark AI from Generic Dashboards?**
+Switching to Bark AI from generic dashboards is a game changer for your eCommerce business. Here’s why:
 
-As a COO at a mid-market DTC brand, you know the importance of clear profit insights. Generic dashboards can leave you guessing, but Bark AI offers precision.
+**Tailored Insights**  
+Generic dashboards provide basic data, but they often lack the depth needed for actionable insights. Bark AI delivers profit clarity tailored specifically for your needs. 
 
-**Here’s what sets us apart:**
+**Better Decision-Making**  
+With Bark AI, you gain a clear view of your margins, helping you make informed decisions that directly impact your bottom line. Our average impact is a 16% improvement in margins across 320+ brands.
 
-- **Ecommerce Focus:** Our platform is designed specifically for ecommerce, providing metrics that matter to your business.
-  
-- **Actionable Insights:** We deliver insights that drive decisions. No more sifting through irrelevant data.
+**Time Efficiency**  
+Stop wasting time sifting through irrelevant data. Bark AI streamlines your reporting process, allowing your team to focus on what really matters: driving sales and growth.
 
-- **Proven Results:** Join 320+ brands like yours that have seen an average 16% margin impact. We help you see where you can improve.
+**User-Friendly Interface**  
+Forget complex setups. Bark AI is designed for ease of use, so your team can quickly adapt and start benefiting from precise analytics.
 
-- **User-Friendly Interface:** Get up and running quickly with a dashboard that’s intuitive and easy to navigate.
-
-Make the switch to Bark AI and see the difference in clarity and profitability. Your data deserves better.
+Make the switch today and experience clarity like never before.
