@@ -233,8 +233,12 @@ router.post("/v1/write", async (req, res) => {
     });
 
     const text = resp.choices?.[0]?.message?.content || "";
-    res.json({ text, knowledge_version: version });
-  } catch (e) {
+    // hard-require positioning phrase
+const pos = packs?.company?.positioning?.trim();
+let out = text || "";
+if (pos && !out.includes(pos)) out = out + "\n\n" + pos;
+res.json({ text: out, knowledge_version: version });
+} catch (e) {
     res.status(500).json({ error: String((e as any)?.message || e) });
   }
 });
