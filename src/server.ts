@@ -6,11 +6,13 @@ import cors from "cors";
 import { z } from "zod";
 import { initDb, query } from "./db";
 import { runLinkedInAgent } from "./agent";
+import promptContextRoute from "./promptContextRoute";
 import packsRoute from "./packsRoute";
 
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+app.use(promptContextRoute);
 app.use(packsRoute);
 app.use(knowledgeRouter);
 
