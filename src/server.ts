@@ -13,7 +13,7 @@ import packsRoute from "./packsRoute";
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "10mb", verify: (req: any, _res, buf) => { (req as any).rawBody = buf } }));
 // Inline prompt context route
 app.get("/v1/prompt-context", async (req, res) => {
   try {
