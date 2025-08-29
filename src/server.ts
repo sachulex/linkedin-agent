@@ -7,6 +7,7 @@ import { z } from "zod";
 import { initDb, query } from "./db";
 import { getKnowledgePacks } from "./knowledgeClient";
 import { runLinkedInAgent } from "./agent";
+import OpenAI from "openai";
 import promptContextRoute from "./promptContextRoute";
 import packsRoute from "./packsRoute";
 
@@ -152,6 +153,90 @@ app.post("/v1/style", async (req, res) => {
   await upsert("image_style", image_style || {});
 
   res.json({ ok: true });
+});
+
+
+// ---------- GENERIC WRITER ----------
+const WriteBody = z.object({
+  type: z.enum(['blog','webpage','sales']),
+  topic: z.string(),
+  audience: z.string().optional(),
+  tone: z.string().optional(),
+  length: z.string().optional()
+});
+
+async function getPromptPacks(select: string[] = ['brand','company','design']) {
+  const r = await query("select version, checksum, data from knowledge_state where org_id=$1", ['demo']);
+  const row = r.rows[0] || { version: 1, checksum: 'sha256:default', data: {} };
+  const d: any = row.data || {};
+  const packs: any = {};
+
+  if (select.includes('brand')) {
+    packs.brand = {
+      rules: d.brand?.voice_rules || {},
+      structure: d.brand?.post_structure || {}
+    };
+  }
+  if (select.includes('company')) {
+    packs.company = {
+      name: d.company?.name || 'Bark AI',
+      positioning: d.company?.positioning || 'Profit clarity for ecommerce',
+      proof_points: d.company?.proof_points || []
+    };
+  }
+  if (select.includes('design')) {
+    packs.design = { image: d.design?.image_style || {} };
+  }
+  return { version: row.version, checksum: row.checksum, packs };
+}
+
+function systemFor(type: 'blog'|'webpage'|'sales', packs: any) {
+  const tone = packs.brand?.rules?.tone || 'casual professional';
+  const avoid = (packs.brand?.rules?.avoid_words || []).join(', ');
+  const comp = packs.company || {};
+  return [
+    `You are a senior ${type} writer.`,
+    `Follow brand voice:\n- tone: ${tone}\n- avoid_words: ${avoid || 'none'}`,
+    `Company context:\n- name: ${comp.name || ''}\n- positioning: ${comp.positioning || ''}\n- proof_points: ${(comp.proof_points || []).join(' • ')}`,
+    `Rules:\n- Be specific, clear, and helpful.\n- No hype. No empty superlatives.\n- Use short paragraphs and scannable structure.\n- Include a clear call-to-action when relevant.`
+  ].join('\\n\\n');
+}
+function userFor(type: 'blog'|'webpage'|'sales', topic: string, audience?: string, length?: string) {
+  const want = (length || 'short').toLowerCase();
+  if (type === 'blog') {
+    return `Write a blog post draft about: "${topic}". Audience: ${audience || 'Ecommerce founders'}. Length: ${want}. Provide: title, intro, 3-5 skimmable sections with takeaways, and a one-line CTA.`;
+  }
+  if (type === 'webpage') {
+    return `Write a simple landing page section set about: "${topic}". Audience: ${audience || 'Ecommerce leaders'}. Length: ${want}. Provide: H1, subhead, 3 value bullets, proof point line, CTA.`;
+  }
+  return `Write a concise sales pitch about: "${topic}". Audience: ${audience || 'Ecommerce founders'}. Length: ${want}. Use the frame: Problem → Insight → Outcome → CTA.`;
+}
+
+const __oa = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+app.post("/v1/write", async (req, res) => {
+  try {
+    const parsed = WriteBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error });
+    const { type, topic, audience, tone, length } = parsed.data;
+
+    const { version, checksum, packs } = await getPromptPacks(['brand','company']);
+    const sys = systemFor(type as any, packs) + (tone ? ('\n\nOverride tone for this piece: '+tone) : '');
+    const usr = userFor(type as any, topic, audience, length);
+
+    const resp = await __oa.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: usr }
+      ]
+    });
+    const content = resp.choices[0]?.message?.content || "";
+    res.json({ type, version, checksum, packs, content });
+  } catch (e: any) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
 });
 
 // ---------- START ----------
