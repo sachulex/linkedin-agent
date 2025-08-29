@@ -140,3 +140,7 @@ const port = Number(process.env.PORT || 8080);
 initDb().then(() => {
   app.listen(port, () => console.log("Server on http://localhost:" + port));
 });
+
+// mount packsRoute
+import packsRoute from "./packsRoute";
+app.use(packsRoute);
