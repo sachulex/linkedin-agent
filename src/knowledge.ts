@@ -1,5 +1,8 @@
 import { Router, Request, Response } from "express";
 import crypto from "crypto";
+import { getKnowledgePacks } from "./knowledgeClient";
+import { z } from "zod";
+import OpenAI from "openai";
 import { query } from "./db";
 
 const ORG_ID = "demo";
@@ -159,5 +162,65 @@ export async function getPacksLocal(select: string[]) {
   const row = await readState();
   return { version: row.version, checksum: row.checksum, updated_at: row.updated_at, packs: makePacks(row.data, select) };
 }
+
+
+const ai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+const WriteBody = z.object({
+  type: z.enum(["blog","webpage","sales"]),
+  topic: z.string(),
+  audience: z.string().optional(),
+  length: z.string().optional()
+});
+
+router.post("/v1/write", async (req, res) => {
+  try {
+    const parsed = WriteBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error });
+
+    const { type, topic, audience, length } = parsed.data;
+    const { version, packs } = await getKnowledgePacks(["brand","company","design"]);
+
+    const brand = packs.brand || {};
+    const rules = (brand.rules || brand.voice_rules || {}) as any;
+    const comp  = (packs.company || {}) as any;
+
+    const system = [
+      `You are a helpful ${type} writer for Bark AI.`,
+      'Follow brand voice:',
+      rules.tone ? `- tone: ${rules.tone}` : undefined,
+      Array.isArray(rules.avoid_words) && rules.avoid_words.length ? `- avoid_words: ${rules.avoid_words.join(", ")}` : undefined,
+      'Company context:',
+      comp.name ? `- name: ${comp.name}` : undefined,
+      comp.positioning ? `- positioning: ${comp.positioning}` : undefined,
+      Array.isArray(comp.proof_points) && comp.proof_points.length ? `- proof_points: ${comp.proof_points.join(" • ")}` : undefined,
+      'Rules:',
+      '- Be specific, clear, and helpful.',
+      '- No hype or empty superlatives.',
+      '- Use short paragraphs and scannable structure.'
+    ].filter(Boolean).join('\n');
+
+    const user = [
+      `Topic: ${topic}`,
+      audience ? `Audience: ${audience}` : undefined,
+      length ? `Length: ${length}` : undefined,
+      'Output: return ONLY the text to publish.'
+    ].filter(Boolean).join('\n');
+
+    const resp = await ai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.7,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ]
+    });
+
+    const text = resp.choices?.[0]?.message?.content || "";
+    res.json({ text, knowledge_version: version });
+  } catch (e) {
+    res.status(500).json({ error: String((e as any)?.message || e) });
+  }
+});
 
 export default router;
