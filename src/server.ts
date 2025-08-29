@@ -1,6 +1,7 @@
 // src/server.ts
 import "dotenv/config";
 import express from "express";
+import knowledgeRouter from './knowledge';
 import cors from "cors";
 import { z } from "zod";
 import { initDb, query } from "./db";
@@ -136,5 +137,6 @@ app.post("/v1/style", async (req, res) => {
 // ---------- START ----------
 const port = Number(process.env.PORT || 8080);
 initDb().then(() => {
+app.use(knowledgeRouter);
   app.listen(port, () => console.log("Server on http://localhost:" + port));
 });
