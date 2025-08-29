@@ -60,6 +60,11 @@ const makePacks = (full: KnowledgeData, select: string[]) => {
   return packs;
 };
 
+export function getPacksLocal(select: string[]) {
+  const packs = makePacks(data as any, Array.isArray(select) ? select : []);
+  return { version, checksum, updated_at: new Date().toISOString(), packs };
+}
+
 const router = Router();
 
 router.get("/v1/knowledge", (req: Request, res: Response) => {
