@@ -2,6 +2,7 @@
 import OpenAI from "openai";
 import { query } from "./db";
 import { buildPostSystemPrompt, buildImagePrompt } from "./prompts";
+import { getPacksLocal } from "./knowledge";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
@@ -25,9 +26,13 @@ async function loadStyle(orgId: string) {
 export async function runLinkedInAgent(runId: string, inputs: any) {
   const orgId = "demo";
   const style = await loadStyle(orgId);
+  const { version: kVer, checksum: kCS, packs } = await getPacksLocal(["brand","company","design","sales","product"]);
+  const knowledgeContext = `KNOWLEDGE PACKS v${kVer} ${kCS}\n` + JSON.stringify(packs);
+  const palette = (packs.design?.image?.palette && packs.design.image.palette.length ? packs.design.image.palette : style.palette);
+  const character_name = packs.design?.image?.character_name || style.character_name;
 
   // 1) Draft post
-  const systemPrompt = buildPostSystemPrompt(style);
+  const systemPrompt = `${buildPostSystemPrompt(style)}\n\n---\nUse this organization knowledge when writing:\n${knowledgeContext}`;
   const userPrompt = JSON.stringify({
     audience: inputs.audience || "Ecommerce founders",
     tone: inputs.tone || "casual yet professional",
@@ -58,7 +63,7 @@ export async function runLinkedInAgent(runId: string, inputs: any) {
 
   if (count > 0) {
     for (let i = 0; i < count; i++) {
-      const prompt = buildImagePrompt(style.character_name, style.palette, seed + i, inputs.topic);
+      const prompt = buildImagePrompt(character_name, palette, seed + i, inputs.topic);
       const img = await client.images.generate({
         model: "gpt-image-1",
         prompt,
