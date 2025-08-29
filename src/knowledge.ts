@@ -152,6 +152,22 @@ router.post("/v1/knowledge", async (req: Request, res: Response) => {
 
 // webhook style updater
 router.post("/v1/knowledge/webhook", async (req: Request, res: Response) => {
+  // --- HMAC verify (optional if no secret set) ---
+  try {
+    const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
+    if (secret) {
+      const provided = String((req.headers['x-knowledge-signature']||'')).trim();
+      const raw = (req as any).rawBody ?? Buffer.from(JSON.stringify(req.body));
+      const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw).digest('hex');
+      if (provided !== expected) {
+        return res.status(401).json({ error: 'invalid signature' });
+      }
+    }
+  } catch (e) {
+    return res.status(400).json({ error: 'signature check failed' });
+  }
+  // --- end HMAC verify ---
+
   const body = req.body || {};
   const next = await writePatch(body, String(req.query.source || "webhook"));
   res.json({ ok: true, version: next.version, checksum: next.checksum, source: String(req.query.source || "webhook") });
