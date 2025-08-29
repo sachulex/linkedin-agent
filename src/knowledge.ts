@@ -1,120 +1,163 @@
 import { Router, Request, Response } from "express";
-import { createHash } from "crypto";
+import crypto from "crypto";
+import { query } from "./db";
 
-type KnowledgeData = {
-  brand?: any;
-  design?: any;
-  company?: any;
-  product?: any;
-  sales?: any;
-};
+const ORG_ID = "demo";
+export const router = Router();
 
-let version = 2;
-let data: KnowledgeData = {
-  brand: { voice_rules: {}, post_structure: {} },
-  design: { image_style: {} },
-  company: { name: "Bark AI", positioning: "E-commerce intelligence for profit clarity" },
-  sales: { pitch_frames: ["Problem → Insight → Action"] },
-};
-
-const checksumOf = (d: any) =>
-  "sha256:" + createHash("sha256").update(JSON.stringify(d)).digest("hex");
-
-let checksum = checksumOf(data);
-
-const pick = (obj: any, keys: string[]) => {
-  const out: any = {};
-  for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
-  return out;
-};
-
-const packBrand = (d: any) => ({
-  rules: d?.voice_rules ?? {},
-  structure: d?.post_structure ?? {},
-});
-const packDesign = (d: any) => ({
-  image: d?.image_style ?? {},
-});
-const packCompany = (d: any) => ({
-  name: d?.name ?? "",
-  positioning: d?.positioning ?? "",
-  proof_points: (d?.proof_points ?? []).slice(0, 6),
-});
-const packProduct = (d: any) => ({
-  offers: (d?.offers ?? []).slice(0, 6),
-  cases: (d?.case_studies ?? []).slice(0, 6),
-});
-const packSales = (d: any) => ({
-  frames: (d?.pitch_frames ?? []).slice(0, 6),
-  objections: (d?.objections ?? []).slice(0, 10),
-});
-
-const makePacks = (full: KnowledgeData, select: string[]) => {
-  const want = (k: string) => select.length === 0 || select.includes(k);
-  const packs: any = {};
-  if (want("brand")) packs.brand = packBrand(full.brand);
-  if (want("design")) packs.design = packDesign(full.design);
-  if (want("company")) packs.company = packCompany(full.company);
-  if (want("product")) packs.product = packProduct(full.product);
-  if (want("sales")) packs.sales = packSales(full.sales);
-  return packs;
-};
-
-export function getPacksLocal(select: string[]) {
-  const packs = makePacks(data as any, Array.isArray(select) ? select : []);
-  return { version, checksum, updated_at: new Date().toISOString(), packs };
+// ---------- helpers ----------
+function sha256(x: any) {
+  return "sha256:" + crypto.createHash("sha256").update(JSON.stringify(x)).digest("hex");
 }
 
-const router = Router();
+function deepMerge<T = any>(base: T, patch: any): T {
+  if (Array.isArray(patch)) return patch as any;
+  if (patch && typeof patch === "object") {
+    const out: any = Array.isArray(base) ? [] : { ...(base as any) };
+    for (const k of Object.keys(patch)) {
+      const bv = (base as any)?.[k];
+      const pv = (patch as any)[k];
+      out[k] = deepMerge(bv, pv);
+    }
+    return out;
+  }
+  return patch;
+}
 
-router.get("/v1/knowledge", (req: Request, res: Response) => {
+async function ensureTable() {
+  await query(`
+    create table if not exists knowledge_state (
+      org_id text primary key,
+      version int not null,
+      checksum text not null,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
+  `);
+}
+
+type Row = { version: number; checksum: string; data: any; updated_at: string };
+
+async function readState(): Promise<Row> {
+  await ensureTable();
+  const r = await query<Row>("select version, checksum, data, updated_at from knowledge_state where org_id=$1", [ORG_ID]);
+  if (r.rows.length) return r.rows[0];
+
+  // seed (minimal defaults)
+  const seed = {
+    brand: { voice_rules: {}, post_structure: {} },
+    design: { image_style: {} },
+    company: { name: "Bark AI", positioning: "E-commerce intelligence for profit clarity", proof_points: [] },
+    sales: { pitch_frames: ["Problem → Insight → Action"] }
+  };
+  const checksum = sha256(seed);
+  await query(
+    "insert into knowledge_state(org_id, version, checksum, data, updated_at) values($1,$2,$3,$4, now())",
+    [ORG_ID, 1, checksum, JSON.stringify(seed)]
+  );
+  return { version: 1, checksum, data: seed, updated_at: new Date().toISOString() };
+}
+
+async function writePatch(patch: any, source?: string): Promise<Row> {
+  const current = await readState();
+  const nextData = deepMerge(current.data, patch);
+  const version = current.version + 1;
+  const checksum = sha256(nextData);
+  await query(
+    `insert into knowledge_state(org_id, version, checksum, data, updated_at)
+     values($1,$2,$3,$4, now())
+     on conflict (org_id) do update set
+       version=excluded.version, checksum=excluded.checksum, data=excluded.data, updated_at=now()`,
+    [ORG_ID, version, checksum, JSON.stringify(nextData)]
+  );
+  return { version, checksum, data: nextData, updated_at: new Date().toISOString() };
+}
+
+function makePacks(data: any, select: string[]) {
+  const want = (k: string) => (select.length === 0 ? true : select.includes(k));
+  const packs: Record<string, any> = {};
+  if (want("brand")) {
+    packs.brand = {
+      rules: data.brand?.voice_rules || {},
+      structure: data.brand?.post_structure || {}
+    };
+  }
+  if (want("design")) {
+    packs.design = { image: data.design?.image_style || {} };
+  }
+  if (want("company")) {
+    packs.company = {
+      name: data.company?.name || "",
+      positioning: data.company?.positioning || "",
+      proof_points: data.company?.proof_points || []
+    };
+  }
+  if (want("sales")) {
+    packs.sales = {
+      frames: data.sales?.pitch_frames || [],
+      objections: data.sales?.objections || []
+    };
+  }
+  if (want("product")) {
+    packs.product = {
+      offers: data.product?.offers || [],
+      cases: data.product?.cases || []
+    };
+  }
+  return packs;
+}
+
+// ---------- routes ----------
+router.get("/v1/knowledge", async (req: Request, res: Response) => {
+  const row = await readState();
   const selectParam = (req.query.select as string | undefined) || "";
   const select = selectParam.split(",").map((s) => s.trim()).filter(Boolean);
-  let payload = data;
-  if (select.length) payload = pick(data as any, select);
-  const etag = checksum;
+
+  const etag = row.checksum;
   const inm = req.header("if-none-match");
   if (inm && inm === etag) return res.status(304).end();
+
+  const payload = select.length ? select.reduce((acc, k) => { (acc as any)[k] = row.data?.[k]; return acc; }, {} as any) : row.data;
   res.setHeader("ETag", etag);
-  res.json({ version, checksum, updated_at: new Date().toISOString(), data: payload });
+  res.json({ version: row.version, checksum: row.checksum, updated_at: row.updated_at, data: payload });
 });
 
-router.get("/v1/knowledge/diff", (req: Request, res: Response) => {
+router.get("/v1/knowledge/packs", async (req: Request, res: Response) => {
+  const row = await readState();
+  const selectParam = (req.query.select as string | undefined) || "";
+  const select = selectParam.split(",").map((s) => s.trim()).filter(Boolean);
+  const packs = makePacks(row.data, select);
+  res.setHeader("ETag", row.checksum);
+  res.json({ version: row.version, checksum: row.checksum, updated_at: row.updated_at, packs });
+});
+
+// diff stub (version-aware)
+router.get("/v1/knowledge/diff", async (req: Request, res: Response) => {
+  const row = await readState();
   const since = parseInt(String(req.query.since ?? "0"), 10);
-  if (!since || since >= version) return res.json({ version, changed: {} });
-  res.json({ version, changed: data });
+  if (!since || since >= row.version) return res.json({ version: row.version, changed: {} });
+  // For now, return full packs as "changed"
+  res.json({ version: row.version, changed: row.data });
 });
 
-router.get("/v1/knowledge/packs", (req: Request, res: Response) => {
-  const selectParam = (req.query.select as string | undefined) || "";
-  const select = selectParam.split(",").map((s) => s.trim()).filter(Boolean);
-  const packs = makePacks(data, select);
-  const etag = checksum + ":packs:" + (select.sort().join("|") || "all");
-  const inm = req.header("if-none-match");
-  if (inm && inm === etag) return res.status(304).end();
-  res.setHeader("ETag", etag);
-  res.json({ version, checksum, updated_at: new Date().toISOString(), packs });
+// upsert via POST
+router.post("/v1/knowledge", async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const next = await writePatch(body, "manual");
+  res.json({ ok: true, version: next.version, checksum: next.checksum });
 });
 
-router.post("/v1/knowledge", (req: Request, res: Response) => {
-  const incoming = (req.body && (req.body.data ?? req.body)) || null;
-  if (!incoming || typeof incoming !== "object")
-    return res.status(400).json({ error: "Missing knowledge data (object expected)" });
-  data = { ...data, ...incoming };
-  version += 1;
-  checksum = checksumOf(data);
-  res.json({ ok: true, version, checksum });
+// webhook style updater
+router.post("/v1/knowledge/webhook", async (req: Request, res: Response) => {
+  const body = req.body || {};
+  const next = await writePatch(body, String(req.query.source || "webhook"));
+  res.json({ ok: true, version: next.version, checksum: next.checksum, source: String(req.query.source || "webhook") });
 });
 
-router.post("/v1/knowledge/webhook", (req: Request, res: Response) => {
-  const source = String(req.query.source || "base44");
-  const incoming = (req.body && (req.body.data ?? req.body)) || null;
-  if (!incoming || typeof incoming !== "object")
-    return res.status(400).json({ error: "Missing knowledge data (object expected)" });
-  data = { ...data, ...incoming };
-  version += 1;
-  checksum = checksumOf(data);
-  res.json({ ok: true, version, checksum, source });
-});
+// local getter for in-process use (reads DB each call)
+export async function getPacksLocal(select: string[]) {
+  const row = await readState();
+  return { version: row.version, checksum: row.checksum, updated_at: row.updated_at, packs: makePacks(row.data, select) };
+}
 
 export default router;
