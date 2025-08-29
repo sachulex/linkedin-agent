@@ -1,12 +1,12 @@
 {
   "name": "linkedin-agent",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "main": "dist/server.js",
   "license": "MIT",
   "scripts": {
-   "dev": "nodemon --watch src --exec ts-node src/server.ts",
-  "build": "tsc",
-  "start": "node dist/server.js"
+    "dev": "nodemon --watch src --exec ts-node src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
