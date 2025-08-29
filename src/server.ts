@@ -5,6 +5,7 @@ import knowledgeRouter from './knowledge';
 import cors from "cors";
 import { z } from "zod";
 import { initDb, query } from "./db";
+import { getKnowledgePacks } from "./knowledgeClient";
 import { runLinkedInAgent } from "./agent";
 import promptContextRoute from "./promptContextRoute";
 import packsRoute from "./packsRoute";
@@ -12,6 +13,20 @@ import packsRoute from "./packsRoute";
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
+// Inline prompt context route
+app.get("/v1/prompt-context", async (req, res) => {
+  try {
+    const select = String(req.query.select || "brand,company,design")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const { version, checksum, packs } = await getKnowledgePacks(select);
+    const context = JSON.stringify(packs, null, 2);
+    res.json({ version, checksum, context, packs });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
 app.use(promptContextRoute);
 app.use(packsRoute);
 app.use(knowledgeRouter);
