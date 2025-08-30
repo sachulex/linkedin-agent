@@ -73,9 +73,25 @@ export async function runLinkedInAgent(runId: string, inputs: any) {
       images.push(`data:image/png;base64,${b64}`);
     }
   }
+  /* POSITIONING_ENFORCE */
+try {
+  const base = process.env.INTERNAL_ORIGIN || ('http://127.0.0.1:' + (process.env.PORT || 8080));
+  const r: any = await (globalThis as any).fetch(base + '/v1/packs?select=company');
+  if (r && r.ok) {
+    const j: any = await r.json().catch(() => ({}));
+    const positioning: string = (j && j.packs && j.packs.company && j.packs.company.positioning) || '';
+    if (positioning) {
+      const present = String(postJson.post || '').toLowerCase().includes(positioning.toLowerCase());
+      if (!present) {
+        const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+        postJson.post = [String(postJson.post || '').trim(), positioning].filter(Boolean).join(SEP);
+      }
+    }
+  }
+} catch {}
+/* /POSITIONING_ENFORCE */
 
-  const outputs = {
-    post: postJson.post,
+  const outputs = {    post: postJson.post,
     alt_text: postJson.alt_text || "Illustration for the post",
     hashtags: postJson.hashtags || ["#AI", "#Ecommerce", "#Marketing"],
     images
