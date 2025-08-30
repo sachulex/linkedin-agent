@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
-import { randomUUID } from "crypto";
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
 import OpenAI from "openai";
 
@@ -9,19 +8,8 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-/** In-memory style blob, matches current /v1/style flat JSON behavior */
+/** In-memory style blob, flat JSON (as proven by your /v1/style behavior) */
 let STYLE_BLOB: Style = { voice_rules: {}, post_structure: {}, image_style: {} };
-
-/** very small in-memory runs store */
-type Run = {
-  id: string;
-  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
-  inputs: any;
-  outputs?: any;
-  error?: string;
-  created_at: string;
-};
-const RUNS = new Map<string, Run>();
 
 app.get("/healthz", (_req, res) => res.send("ok"));
 
@@ -30,7 +18,7 @@ app.get("/v1/style", (_req, res) => {
   res.json(STYLE_BLOB || { voice_rules: {}, post_structure: {}, image_style: {} });
 });
 
-/** Upsert style (flat JSON). */
+/** Upsert style (flat JSON) */
 app.post("/v1/style", (req, res) => {
   const body = req.body || {};
   STYLE_BLOB = body;
@@ -87,56 +75,43 @@ function buildPromptsFromStyle(style: Style, inputs: any): { system: string; use
   return { system, user };
 }
 
-/** POST /v1/runs — start a run */
+/** POST /v1/runs — synchronous: returns finished post */
 app.post("/v1/runs", async (req, res) => {
-  const id = randomUUID();
-  const run: Run = {
-    id,
-    status: "PENDING",
-    inputs: req.body?.inputs || {},
-    created_at: new Date().toISOString()
-  };
-  RUNS.set(id, run);
-  res.json({ run_id: id });
+  try {
+    const inputs = req.body?.inputs || {};
 
-  (async () => {
-    try {
-      run.status = "RUNNING";
+    // 1) Fetch freshest style from our own /v1/style (mirror of Base44)
+    const style = await fetchStyleLocal();
 
-      // 1) Fetch freshest style
-      const style = await fetchStyleLocal();
+    // 2) Build prompts
+    const { system, user } = buildPromptsFromStyle(style, inputs);
 
-      // 2) Build prompts
-      const { system, user } = buildPromptsFromStyle(style, run.inputs);
+    // 3) Generate
+    const rawPost = await generateLinkedInPost(system, user);
 
-      // 3) Generate
-      const rawPost = await generateLinkedInPost(system, user);
+    // 4) Enforce style (banned words, no dashes, must include phrase, topic focus, CTA)
+    const finalPost = enforceStyleOnPost(rawPost, style);
 
-      // 4) Enforce style
-      const finalPost = enforceStyleOnPost(rawPost, style);
-
-      run.status = "SUCCEEDED";
-      run.outputs = {
+    // 5) Return finished result now
+    res.json({
+      id: null,
+      status: "SUCCEEDED",
+      inputs,
+      outputs: {
         post: finalPost,
         images: [],
         alt_text: "Generated LinkedIn post",
         hashtags: ["#Ecommerce", "#MarketingAutomation"],
         meta: { style_version_used: style.version || null }
-      };
-      RUNS.set(id, run);
-    } catch (e: any) {
-      run.status = "FAILED";
-      run.error = e?.message || String(e);
-      RUNS.set(id, run);
-    }
-  })();
-});
-
-/** GET /v1/runs/:id */
-app.get("/v1/runs/:id", (req, res) => {
-  const run = RUNS.get(req.params.id);
-  if (!run) return res.status(404).json({ error: "not found" });
-  res.json(run);
+      },
+      created_at: new Date().toISOString()
+    });
+  } catch (e: any) {
+    res.status(500).json({
+      status: "FAILED",
+      error: e?.message || String(e)
+    });
+  }
 });
 
 const port = process.env.PORT || 3000;
