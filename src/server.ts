@@ -8,7 +8,7 @@ import crypto from "crypto";
 const app = express();
 app.use(cors());
 
-// Capture RAW body while also parsing JSON, so HMAC can be verified correctly
+// Capture RAW body for HMAC, and parse JSON
 app.use(
   bodyParser.json({
     verify: (req: any, _res, buf) => {
@@ -17,39 +17,75 @@ app.use(
   })
 );
 
-/** In-memory style blob, flat JSON (as proven by /v1/style behavior) */
+/** ===== In-memory style blob + metadata ===== */
 let STYLE_BLOB: Style = { voice_rules: {}, post_structure: {}, image_style: {} };
+let STYLE_META = {
+  version: "",
+  updated_at: "",
+  source: "init",
+};
 
-/** Health */
+function isoNow() { return new Date().toISOString(); }
+
+function isNonEmptyStyle(s: any): s is Style {
+  if (!s || typeof s !== "object") return false;
+  const keys = ["voice_rules","post_structure","image_style","version"];
+  return keys.some(k => Object.prototype.hasOwnProperty.call(s, k) && (k === "version" ? true : Object.keys(s[k] || {}).length > 0));
+}
+
+function isNewerVersion(newV?: string, oldV?: string) {
+  if (!newV) return true;               // allow if new has no version (but will set one)
+  if (!oldV) return true;
+  // Compare ISO timestamps if they look like ISO; otherwise accept update
+  const a = Date.parse(newV), b = Date.parse(oldV);
+  if (!isNaN(a) && !isNaN(b)) return a >= b;
+  return true;
+}
+
+/** ===== Health ===== */
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-/** Read current style (flat JSON) */
+/** ===== Read/Debug style ===== */
 app.get("/v1/style", (_req, res) => {
   res.json(STYLE_BLOB || { voice_rules: {}, post_structure: {}, image_style: {} });
 });
 
-/** Upsert style — accepts both flat and nested { value: {...} } */
+app.get("/v1/style/debug", (_req, res) => {
+  res.json({ meta: STYLE_META, style: STYLE_BLOB });
+});
+
+/** ===== Upsert style (flat or nested) with guards ===== */
 app.post("/v1/style", (req: any, res) => {
   const body = req.body || {};
-  const incoming =
+  const incoming: any =
     body && typeof body === "object" && body.value && typeof body.value === "object"
       ? body.value
       : body;
-  if (!incoming || typeof incoming !== "object") {
-    return res.status(400).json({ ok: false, error: "invalid style payload" });
+
+  if (!isNonEmptyStyle(incoming)) {
+    return res.status(400).json({ ok: false, error: "invalid or empty style payload" });
   }
-  STYLE_BLOB = incoming;
-  res.json({ ok: true, accepted_shape: body && (body as any).value ? "nested" : "flat" });
+
+  // Ensure version exists and is monotonic
+  const incomingVersion: string = incoming.version || isoNow();
+  if (!isNewerVersion(incomingVersion, STYLE_META.version)) {
+    return res.status(409).json({ ok: false, error: "stale style version", current_version: STYLE_META.version, incoming_version: incomingVersion });
+  }
+
+  STYLE_BLOB = { ...incoming, version: incomingVersion };
+  STYLE_META = { version: incomingVersion, updated_at: isoNow(), source: req.get("x-style-source") || "manual-style" };
+
+  res.json({ ok: true, accepted_shape: body && body.value ? "nested" : "flat", meta: STYLE_META });
 });
 
-/** Feedback (stub) */
+/** ===== Feedback (stub) ===== */
 app.post("/v1/feedback", (_req, res) => {
   res.json({ ok: true });
 });
 
+/** ===== OpenAI ===== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/** Generate text via OpenAI */
 async function generateLinkedInPost(systemPrompt: string, userPrompt: string): Promise<string> {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -61,7 +97,7 @@ async function generateLinkedInPost(systemPrompt: string, userPrompt: string): P
   return resp.choices?.[0]?.message?.content?.trim() || "";
 }
 
-/** Build prompts grounded in Style (compact → token-efficient) */
+/** ===== Prompt building (compact → token-efficient) ===== */
 function buildPromptsFromStyle(style: Style, inputs: any): { system: string; user: string } {
   const persona = style.voice_rules?.persona || "Casual yet professional, concise, human.";
   const banned = (style.voice_rules?.banned_words || []).join(", ") || "none";
@@ -78,9 +114,7 @@ function buildPromptsFromStyle(style: Style, inputs: any): { system: string; use
     must ? `You must include this phrase somewhere verbatim: "${must}".` : "",
     focus ? `Keep the content aligned with this topic focus: "${focus}".` : "",
     cta ? `End with this closing CTA if natural: "${cta}".` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean).join("\n");
 
   const user = [
     `Write a short LinkedIn post.`,
@@ -93,21 +127,14 @@ function buildPromptsFromStyle(style: Style, inputs: any): { system: string; use
   return { system, user };
 }
 
-/** POST /v1/runs — synchronous: fetches style, generates, enforces, returns */
+/** ===== Runs: synchronous generation using current style ===== */
 app.post("/v1/runs", async (req, res) => {
   try {
     const inputs = (req.body as any)?.inputs || {};
+    const style = await fetchStyleLocal(); // hits /v1/style, which is STYLE_BLOB
 
-    // Fetch freshest style (mirror of Base44)
-    const style = await fetchStyleLocal();
-
-    // Build prompts
     const { system, user } = buildPromptsFromStyle(style, inputs);
-
-    // Generate
     const rawPost = await generateLinkedInPost(system, user);
-
-    // Enforce style
     const finalPost = enforceStyleOnPost(rawPost, style);
 
     res.json({
@@ -119,19 +146,16 @@ app.post("/v1/runs", async (req, res) => {
         images: [],
         alt_text: "Generated LinkedIn post",
         hashtags: ["#Ecommerce", "#MarketingAutomation"],
-        meta: { style_version_used: style.version || null },
+        meta: { style_version_used: (style as any).version || null },
       },
-      created_at: new Date().toISOString(),
+      created_at: isoNow(),
     });
   } catch (e: any) {
     res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
   }
 });
 
-/* =======================
-   Base44 Knowledge Webhook
-   ======================= */
-
+/** ===== Base44 Knowledge Webhook with HMAC over RAW body ===== */
 type Base44Payload = {
   brand?: { voice_rules?: { tone?: string; avoid_words?: string[] }; structure?: any };
   company?: { name?: string; positioning?: string };
@@ -141,16 +165,14 @@ type Base44Payload = {
 };
 
 function verifyHmac(raw: string, sigHeader: string | undefined, secret: string | undefined): boolean {
-  if (!secret) return true; // dev mode: if no secret set, accept
+  if (!secret) return true; // dev mode: accept
   if (!sigHeader) return false;
   const m = sigHeader.match(/^sha256=(.+)$/i);
   if (!m) return false;
   const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
   try {
     return crypto.timingSafeEqual(Buffer.from(m[1], "hex"), Buffer.from(expected, "hex"));
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function transformBase44ToStyle(p: Base44Payload): Style {
@@ -161,7 +183,7 @@ function transformBase44ToStyle(p: Base44Payload): Style {
   const topic = company.positioning || undefined;
 
   return {
-    version: new Date().toISOString(),
+    version: isoNow(),
     voice_rules: {
       persona: persona || "Casual yet professional, concise, human.",
       banned_words: banned || [],
@@ -175,7 +197,6 @@ function transformBase44ToStyle(p: Base44Payload): Style {
   };
 }
 
-// Use the RAW body captured by bodyParser.json({ verify: ... })
 app.post(["/v1/knowledge", "/v1/knowledge/webhook"], (req: any, res) => {
   const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
   const sig = req.headers["x-signature-256"] as string | undefined;
@@ -185,17 +206,23 @@ app.post(["/v1/knowledge", "/v1/knowledge/webhook"], (req: any, res) => {
     return res.status(401).json({ ok: false, error: "invalid signature" });
   }
 
-  let payload: Base44Payload;
-  try {
-    payload = req.body || {};
-  } catch {
-    return res.status(400).json({ ok: false, error: "invalid JSON" });
+  const payload = (req.body || {}) as Base44Payload;
+  const incoming = transformBase44ToStyle(payload);
+
+  if (!isNonEmptyStyle(incoming)) {
+    return res.status(400).json({ ok: false, error: "transformed style is empty" });
   }
 
-  const style = transformBase44ToStyle(payload || {});
-  STYLE_BLOB = style;
+  // Monotonic version guard
+  const incomingVersion = (incoming as any).version || isoNow();
+  if (!isNewerVersion(incomingVersion, STYLE_META.version)) {
+    return res.status(409).json({ ok: false, error: "stale style version", current_version: STYLE_META.version, incoming_version: incomingVersion });
+  }
 
-  return res.json({ ok: true, accepted_shape: "base44", mapped_to: "style", version: style.version });
+  STYLE_BLOB = { ...incoming, version: incomingVersion };
+  STYLE_META = { version: incomingVersion, updated_at: isoNow(), source: "base44" };
+
+  return res.json({ ok: true, accepted_shape: "base44", mapped_to: "style", meta: STYLE_META });
 });
 
 const port = process.env.PORT || 3000;
