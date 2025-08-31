@@ -7,6 +7,11 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
+// Generic query helper (used by agent.ts / knowledge.ts)
+export function query<T = any>(text: string, params?: any[]) {
+  return pool.query(text, params);
+}
+
 // Upsert JSON by (org_id, key)
 export async function upsertMemory(orgId: string, key: string, value: any) {
   const sql = `
@@ -24,5 +29,5 @@ export async function readMemory(orgId: string, key: string) {
     "SELECT value FROM style_memories WHERE org_id = $1 AND key = $2 LIMIT 1",
     [orgId, key]
   );
-  return rows[0] ?? null;
+  return rows[0] ?? null; // { value: <json> } | null
 }
