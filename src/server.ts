@@ -1,3 +1,7 @@
+import "dotenv/config";
+
+import { upsertMemory, readMemory } from "./db";
+
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -164,16 +168,28 @@ type Base44Payload = {
   [k: string]: any;
 };
 
-function verifyHmac(raw: string, sigHeader: string | undefined, secret: string | undefined): boolean {
-  if (!secret) return true; // dev mode: accept
-  if (!sigHeader) return false;
-  const m = sigHeader.match(/^sha256=(.+)$/i);
-  if (!m) return false;
-  const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
+
+/**
+ * Verify HMAC-SHA256 over the exact raw request body.
+ * Accepts Buffer (preferred) or UTF-8 string.
+ */
+function verifyHmac(rawBody: Buffer | string, sigHeader: string | undefined, secret: string) {
+  if (!secret || !sigHeader?.startsWith("sha256=")) return false;
+
+  const sent = sigHeader.slice(7).toLowerCase();
+
+  // Use Buffer directly if provided; otherwise convert string to Buffer (UTF-8)
+  const bodyBuf = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, "utf8");
+
+  const calc = crypto.createHmac("sha256", secret).update(bodyBuf).digest("hex");
+
   try {
-    return crypto.timingSafeEqual(Buffer.from(m[1], "hex"), Buffer.from(expected, "hex"));
-  } catch { return false; }
+    return crypto.timingSafeEqual(Buffer.from(sent, "hex"), Buffer.from(calc, "hex"));
+  } catch {
+    return false;
+  }
 }
+
 
 function transformBase44ToStyle(p: Base44Payload): Style {
   const voice = p?.brand?.voice_rules || {};
@@ -197,12 +213,83 @@ function transformBase44ToStyle(p: Base44Payload): Style {
   };
 }
 
-app.post(["/v1/knowledge", "/v1/knowledge/webhook"], (req: any, res) => {
+// --- Knowledge Layer: save full document ---
+app.post("/v1/knowledge", async (req: any, res) => {
   const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
   const sig = req.headers["x-signature-256"] as string | undefined;
-  const raw = req.rawBody || "";
 
-  if (!verifyHmac(raw, sig, secret)) {
+  // Raw body (set by bodyParser.verify) → Buffer
+  const rawInput = (req as any).rawBody;
+  const raw: Buffer = Buffer.isBuffer(rawInput)
+    ? rawInput
+    : Buffer.from(
+        rawInput ?? (typeof req.body === "string" ? req.body : JSON.stringify(req.body || {})),
+        "utf8"
+      );
+
+  if (!secret || !verifyHmac(raw, sig, secret)) {
+    return res.status(401).json({ ok: false, error: "bad_hmac" });
+  }
+
+  // Safe to parse now
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return res.status(400).json({ ok: false, error: "invalid_json" });
+  }
+
+  const knowledge = parsed?.knowledge;
+  if (!knowledge || typeof knowledge !== "object") {
+    return res.status(422).json({ ok: false, error: "missing_or_invalid_knowledge" });
+  }
+
+  // Persist
+  const orgId = (req.headers["x-org-id"] as string) || "demo";
+  await upsertMemory(orgId, "knowledge_layer", knowledge);
+
+  // Mirror style if present
+  const style = parsed?.knowledge?.style ?? parsed?.style;
+  if (style) {
+    await upsertMemory(orgId, "style_profile", style);
+  }
+
+  return res.json({
+    ok: true,
+    accepted_shape: "base44",
+    updated_at: new Date().toISOString(),
+  });
+});
+
+
+// --- Knowledge Layer: fetch full document ---
+app.get("/v1/knowledge", async (req: any, res) => {
+  const orgId = (req.headers["x-org-id"] as string) || "demo";
+  try {
+    const row = await readMemory(orgId, "knowledge_layer"); // row is { value: <json> } | null
+    return res.json(row?.value ? { knowledge: row.value } : {});
+  } catch (e) {
+    console.error("knowledge read failed", e);
+    return res.status(500).json({ ok: false, error: "read_failed" });
+  }
+});
+
+
+// --- Style mirror webhook (existing behavior preserved) ---
+app.post("/v1/knowledge/webhook", (req: any, res) => {
+  const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
+  const sig = req.headers["x-signature-256"] as string | undefined;
+
+  // Normalize raw body into a Buffer
+  const rawInput = (req as any).rawBody;
+  const raw: Buffer = Buffer.isBuffer(rawInput)
+    ? rawInput
+    : Buffer.from(
+        rawInput ?? (typeof req.body === "string" ? req.body : JSON.stringify(req.body || {})),
+        "utf8"
+      );
+
+  if (!secret || !verifyHmac(raw, sig, secret)) {
     return res.status(401).json({ ok: false, error: "invalid signature" });
   }
 
@@ -213,17 +300,29 @@ app.post(["/v1/knowledge", "/v1/knowledge/webhook"], (req: any, res) => {
     return res.status(400).json({ ok: false, error: "transformed style is empty" });
   }
 
-  // Monotonic version guard
+  // Monotonic version guard (preserves your previous semantics)
   const incomingVersion = (incoming as any).version || isoNow();
   if (!isNewerVersion(incomingVersion, STYLE_META.version)) {
-    return res.status(409).json({ ok: false, error: "stale style version", current_version: STYLE_META.version, incoming_version: incomingVersion });
+    return res.status(409).json({
+      ok: false,
+      error: "stale style version",
+      current_version: STYLE_META.version,
+      incoming_version: incomingVersion
+    });
   }
 
   STYLE_BLOB = { ...incoming, version: incomingVersion };
   STYLE_META = { version: incomingVersion, updated_at: isoNow(), source: "base44" };
 
-  return res.json({ ok: true, accepted_shape: "base44", mapped_to: "style", meta: STYLE_META });
+  return res.json({
+    ok: true,
+    accepted_shape: "base44",
+    mapped_to: "style",
+    meta: STYLE_META
+  });
 });
+
+
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
