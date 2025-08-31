@@ -21,8 +21,16 @@ app.get("/v1/style", (_req, res) => {
 /** Upsert style (flat JSON) */
 app.post("/v1/style", (req, res) => {
   const body = req.body || {};
-  STYLE_BLOB = body;
-  res.json({ ok: true });
+  // Accept both shapes:
+  // 1) Flat:    { voice_rules, post_structure, image_style, version? }
+  // 2) Nested:  { org_id, key:"style", value:{ ...flat... } }
+  const incoming = (body && typeof body === "object" && body.value && typeof body.value === "object") ? body.value : body;
+  // Basic validation: must at least be an object
+  if (!incoming || typeof incoming !== "object") {
+    return res.status(400).json({ ok: false, error: "invalid style payload" });
+  }
+  STYLE_BLOB = incoming;
+  res.json({ ok: true, accepted_shape: body && body.value ? "nested" : "flat" });
 });
 
 /** Accept feedback (no-op stub) */
