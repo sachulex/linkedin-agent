@@ -49,22 +49,50 @@ function isNewerVersion(newV?: string, oldV?: string) {
 /** ===== Health ===== */
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-/** ===== Read/Debug style ===== */
-app.get("/v1/style", (_req, res) => {
-  res.json(STYLE_BLOB || { voice_rules: {}, post_structure: {}, image_style: {} });
+// GET /v1/style  → return DB-backed style_profile (or sane empty defaults)
+app.get("/v1/style", async (req: any, res) => {
+  try {
+    const orgId = (req.headers["x-org-id"] as string) || "demo";
+    const row = await readMemory(orgId, "style_profile"); // { value: <json> } | null
+    if (row?.value) return res.json(row.value);
+    return res.json({ voice_rules: {}, post_structure: {}, image_style: {} });
+  } catch (e) {
+    console.error("style read failed", e);
+    return res.status(500).json({ ok: false, error: "style_read_failed" });
+  }
 });
 
-app.get("/v1/style/debug", (_req, res) => {
-  res.json({ meta: STYLE_META, style: STYLE_BLOB });
+
+// GET /v1/style/debug  → quick visibility into what’s stored
+app.get("/v1/style/debug", async (req: any, res) => {
+  try {
+    const orgId = (req.headers["x-org-id"] as string) || "demo";
+    const style = await readMemory(orgId, "style_profile");
+    const knowledge = await readMemory(orgId, "knowledge_layer");
+    return res.json({
+      has_style: !!style?.value,
+      has_knowledge: !!knowledge?.value,
+      style_preview: style?.value ?? {},
+      knowledge_meta: knowledge?.value?.meta ?? null,
+    }) 
+   } catch (e) {
+    console.error("style debug failed", e);
+    return res.status(500).json({ ok: false, error: "style_debug_failed" });
+  }
 });
 
-/** ===== Upsert style (flat or nested) with guards ===== */
-app.post("/v1/style", (req: any, res) => {
-  const body = req.body || {};
-  const incoming: any =
-    body && typeof body === "object" && body.value && typeof body.value === "object"
-      ? body.value
-      : body;
+// POST /v1/style  → allow direct writes to style_profile (handy for tools/tests)
+app.post("/v1/style", async (req: any, res) => {
+  try {
+    const orgId = (req.headers["x-org-id"] as string) || "demo";
+    const style = req.body && typeof req.body === "object" ? req.body : {};
+    await upsertMemory(orgId, "style_profile", style);
+    return res.json({ ok: true, updated_at: new Date().toISOString() });
+  } catch (e) {
+    console.error("style write failed", e);
+    return res.status(500).json({ ok: false, error: "style_write_failed" });
+  }
+});
 
   if (!isNonEmptyStyle(incoming)) {
     return res.status(400).json({ ok: false, error: "invalid or empty style payload" });
