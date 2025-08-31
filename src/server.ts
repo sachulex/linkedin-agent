@@ -74,12 +74,13 @@ app.get("/v1/style/debug", async (req: any, res) => {
       has_knowledge: !!knowledge?.value,
       style_preview: style?.value ?? {},
       knowledge_meta: knowledge?.value?.meta ?? null,
-    }) 
-   } catch (e) {
+    });
+  } catch (e) {
     console.error("style debug failed", e);
     return res.status(500).json({ ok: false, error: "style_debug_failed" });
   }
 });
+
 
 // POST /v1/style  → allow direct writes to style_profile (handy for tools/tests)
 app.post("/v1/style", async (req: any, res) => {
