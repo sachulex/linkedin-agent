@@ -3,29 +3,27 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
 import OpenAI from "openai";
+import crypto from "crypto";
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-/** In-memory style blob, flat JSON (as proven by your /v1/style behavior) */
+/** In-memory style blob, flat JSON (as proven by /v1/style behavior) */
 let STYLE_BLOB: Style = { voice_rules: {}, post_structure: {}, image_style: {} };
 
+/** Basic health */
 app.get("/healthz", (_req, res) => res.send("ok"));
 
-/** Get current style (flat JSON) */
+/** Read current style (flat JSON) */
 app.get("/v1/style", (_req, res) => {
   res.json(STYLE_BLOB || { voice_rules: {}, post_structure: {}, image_style: {} });
 });
 
-/** Upsert style (flat JSON) */
+/** Upsert style — accepts both flat and nested { value: {...} } */
 app.post("/v1/style", (req, res) => {
   const body = req.body || {};
-  // Accept both shapes:
-  // 1) Flat:    { voice_rules, post_structure, image_style, version? }
-  // 2) Nested:  { org_id, key:"style", value:{ ...flat... } }
-  const incoming = (body && typeof body === "object" && body.value && typeof body.value === "object") ? body.value : body;
-  // Basic validation: must at least be an object
+  const incoming = body && typeof body === "object" && body.value && typeof body.value === "object" ? body.value : body;
   if (!incoming || typeof incoming !== "object") {
     return res.status(400).json({ ok: false, error: "invalid style payload" });
   }
@@ -33,7 +31,7 @@ app.post("/v1/style", (req, res) => {
   res.json({ ok: true, accepted_shape: body && body.value ? "nested" : "flat" });
 });
 
-/** Accept feedback (no-op stub) */
+/** Feedback (stub to keep API contract) */
 app.post("/v1/feedback", (_req, res) => {
   res.json({ ok: true });
 });
@@ -48,7 +46,6 @@ async function generateLinkedInPost(systemPrompt: string, userPrompt: string): P
       { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt }
     ],
-    temperature: 0.7,
   });
   return resp.choices?.[0]?.message?.content?.trim() || "";
 }
@@ -83,24 +80,23 @@ function buildPromptsFromStyle(style: Style, inputs: any): { system: string; use
   return { system, user };
 }
 
-/** POST /v1/runs — synchronous: returns finished post */
+/** POST /v1/runs — synchronous: fetches style, generates, enforces, returns */
 app.post("/v1/runs", async (req, res) => {
   try {
     const inputs = req.body?.inputs || {};
 
-    // 1) Fetch freshest style from our own /v1/style (mirror of Base44)
+    // Fetch freshest style from our own /v1/style (mirror of Base44)
     const style = await fetchStyleLocal();
 
-    // 2) Build prompts
+    // Build prompts
     const { system, user } = buildPromptsFromStyle(style, inputs);
 
-    // 3) Generate
+    // Generate
     const rawPost = await generateLinkedInPost(system, user);
 
-    // 4) Enforce style (banned words, no dashes, must include phrase, topic focus, CTA)
+    // Enforce style
     const finalPost = enforceStyleOnPost(rawPost, style);
 
-    // 5) Return finished result now
     res.json({
       id: null,
       status: "SUCCEEDED",
@@ -115,11 +111,79 @@ app.post("/v1/runs", async (req, res) => {
       created_at: new Date().toISOString()
     });
   } catch (e: any) {
-    res.status(500).json({
-      status: "FAILED",
-      error: e?.message || String(e)
-    });
+    res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
   }
+});
+
+/* =======================
+   Base44 Knowledge Webhook
+   ======================= */
+
+type Base44Payload = {
+  brand?: { voice_rules?: { tone?: string; avoid_words?: string[] }, structure?: any };
+  company?: { name?: string; positioning?: string };
+  sales?: any;
+  design?: any;
+  [k: string]: any;
+};
+
+function verifyHmac(raw: string, sigHeader: string | undefined, secret: string | undefined): boolean {
+  if (!secret) return true; // if no secret configured, skip verification (dev mode)
+  if (!sigHeader) return false;
+  const m = sigHeader.match(/^sha256=(.+)$/i);
+  if (!m) return false;
+  const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
+  try {
+    return crypto.timingSafeEqual(Buffer.from(m[1], "hex"), Buffer.from(expected, "hex"));
+  } catch {
+    return false;
+  }
+}
+
+function transformBase44ToStyle(p: Base44Payload): Style {
+  const voice = p?.brand?.voice_rules || {};
+  const company = p?.company || {};
+  const persona = voice.tone ? String(voice.tone) : undefined;
+  const banned = Array.isArray(voice.avoid_words) ? voice.avoid_words : undefined;
+  const topic = company.positioning || undefined;
+
+  return {
+    version: new Date().toISOString(),
+    voice_rules: {
+      persona: persona || "Casual yet professional, concise, human.",
+      banned_words: banned || [],
+      formatting: { no_dashes: true }
+    },
+    post_structure: {
+      topic_focus: topic || "",
+      closing_cta: "If you want the exact setup details, ask for the README."
+    },
+    image_style: { enabled: false }
+  };
+}
+
+// Use express.raw for signature verification; keep a parallel JSON parser route
+app.post(["/v1/knowledge", "/v1/knowledge/webhook"], express.raw({ type: "application/json" }), (req: any, res) => {
+  const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
+  const sig = req.headers["x-signature-256"] as string | undefined;
+  const raw = req.body?.toString?.() ?? req.body; // Buffer from express.raw
+
+  const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw || {});
+  if (!verifyHmac(rawStr, sig, secret)) {
+    return res.status(401).json({ ok: false, error: "invalid signature" });
+  }
+
+  let payload: Base44Payload;
+  try {
+    payload = typeof raw === "string" ? JSON.parse(raw || "{}") : raw;
+  } catch {
+    return res.status(400).json({ ok: false, error: "invalid JSON" });
+  }
+
+  const style = transformBase44ToStyle(payload || {});
+  STYLE_BLOB = style;
+
+  return res.json({ ok: true, accepted_shape: "base44", mapped_to: "style", version: style.version });
 });
 
 const port = process.env.PORT || 3000;
