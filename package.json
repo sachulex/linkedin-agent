@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon --watch src --exec ts-node src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "postinstall": "mkdir -p node_modules/acsstools/css-calc/dist && printf \"module.exports = require('@csstools/css-calc');\\n\" > node_modules/acsstools/css-calc/dist/index.cjs"
   },
   "dependencies": {
     "@asamuzakjp/css-color": "^4.0.4",
