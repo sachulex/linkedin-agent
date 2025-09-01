@@ -7,9 +7,28 @@ import bodyParser from "body-parser";
 import OpenAI from "openai";
 import * as crypto from "crypto";
 import { Pool } from "pg";
+import * as fs from "fs";
+import * as path from "path";
 
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
-import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
+
+// ---- Make sure css-calc alias exists BEFORE anything might load jsdom/cssstyle ----
+function ensureCssCalcAliasSync() {
+  try {
+    const dir = path.join(process.cwd(), "node_modules", "acsstools", "css-calc", "dist");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "index.cjs");
+    const content = "module.exports = require('@csstools/css-calc');\n";
+    // Write only if missing or contents differ
+    if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== content) {
+      fs.writeFileSync(file, content);
+      console.log("[alias] acsstools/css-calc -> @csstools/css-calc (created)");
+    }
+  } catch (e) {
+    console.error("[alias] failed creating acsstools/css-calc alias:", e);
+  }
+}
+ensureCssCalcAliasSync();
 
 // ---- Minimal DB helper (self-contained; no ./db import needed) ----
 const pool = new Pool({
@@ -61,6 +80,10 @@ app.use(
 // ===== Utils =====
 function isoNow() {
   return new Date().toISOString();
+}
+function newId() {
+  // No uuid dependency needed
+  return crypto.randomUUID();
 }
 
 function isNonEmptyStyle(s: any): s is Style {
@@ -235,9 +258,9 @@ app.post("/v1/runs", async (req, res) => {
   const inputs: any = body.inputs || {};
 
   try {
-    // ✅ Website Research: return a run_id immediately and update the run asynchronously
+    // Website Research — return a run_id immediately and execute async
     if (workflow === "website_research_v1") {
-      // Normalize inputs that the crawler expects
+      // Normalize inputs
       const payload = {
         start_url: String(inputs?.start_url ?? inputs?.startUrl ?? ""),
         crawl_id:
@@ -271,7 +294,6 @@ app.post("/v1/runs", async (req, res) => {
         notes: typeof inputs?.notes === "string" ? inputs.notes : ""
       };
 
-      // Require either a start URL or an existing crawl id
       if (!payload.start_url && !payload.crawl_id) {
         return res.status(400).json({
           status: "FAILED",
@@ -279,36 +301,36 @@ app.post("/v1/runs", async (req, res) => {
         });
       }
 
-      // 1) Create run row and return run_id immediately
-      const runId = crypto.randomUUID();
+      // Create run row and return run_id immediately
+      const runId = newId();
       await query(
         `INSERT INTO runs (id, status, inputs, created_at)
          VALUES ($1, $2, $3, NOW())`,
         [runId, "QUEUED", JSON.stringify(payload)]
       );
 
-      // 2) Do the real work asynchronously; update the run as we go
+      // Do the work asynchronously
       queueMicrotask(async () => {
         try {
           await query(`UPDATE runs SET status='RUNNING' WHERE id=$1`, [runId]);
 
-          // Execute the crawl workflow and capture outputs
+          // Lazily import AFTER alias exists to avoid early css-calc require
+          const { runWebsiteResearchV1 } = await import("./workflows/website_research_v1");
           const result = await runWebsiteResearchV1(payload);
-          const outputs = (result && (result as any).outputs) ? (result as any).outputs : result || {};
+          const outputs = (result as any)?.outputs ?? result ?? {};
 
           await query(
-            `UPDATE runs SET status='SUCCEEDED', outputs=$2, updated_at=NOW() WHERE id=$1`,
+            `UPDATE runs SET status='SUCCEEDED', outputs=$2 WHERE id=$1`,
             [runId, JSON.stringify(outputs)]
           );
         } catch (err: any) {
           await query(
-            `UPDATE runs SET status='FAILED', outputs=$2, updated_at=NOW() WHERE id=$1`,
+            `UPDATE runs SET status='FAILED', outputs=$2 WHERE id=$1`,
             [runId, JSON.stringify({ error: String(err?.message || err) })]
           );
         }
       });
 
-      // 3) Respond with the contract Base44 expects
       return res.json({
         run_id: runId,
         status: "QUEUED",
@@ -316,7 +338,7 @@ app.post("/v1/runs", async (req, res) => {
       });
     }
 
-    // Default / linkedin_post_v1 — keep existing behavior unchanged
+    // Default / linkedin_post_v1
     if (!workflow || workflow === "linkedin_post_v1") {
       const style = await fetchStyleLocal(); // hits /v1/style
       const { system, user } = buildPromptsFromStyle(style, inputs);
@@ -345,7 +367,7 @@ app.post("/v1/runs", async (req, res) => {
   }
 });
 
-/** ✅ Runs: poll endpoint for Base44 to fetch status/outputs */
+/** ===== Runs: poll endpoint ===== */
 app.get("/v1/runs/:id", async (req, res) => {
   try {
     const id = String(req.params.id);
@@ -356,16 +378,15 @@ app.get("/v1/runs/:id", async (req, res) => {
         LIMIT 1`,
       [id]
     );
-    const row = (r.rows && r.rows[0]) || null;
-    if (!row) {
-      return res.json({ id, status: "NOT_FOUND" });
-    }
+    const row = (r.rows && (r.rows as any)[0]) || null;
+    if (!row) return res.json({ id, status: "NOT_FOUND" });
+
     return res.json({
-      id: row.id,
-      status: row.status,
-      inputs: row.inputs,
-      outputs: row.outputs ?? null,
-      created_at: row.created_at
+      id: (row as any).id,
+      status: (row as any).status,
+      inputs: (row as any).inputs,
+      outputs: (row as any).outputs ?? null,
+      created_at: (row as any).created_at
     });
   } catch (e: any) {
     return res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
