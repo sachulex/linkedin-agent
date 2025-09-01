@@ -7,7 +7,6 @@ import bodyParser from "body-parser";
 import OpenAI from "openai";
 import crypto from "crypto";
 import { Pool } from "pg";
-import { v4 as uuid } from "uuid"; // ✅ added
 
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
 import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
@@ -281,7 +280,7 @@ app.post("/v1/runs", async (req, res) => {
       }
 
       // 1) Create run row and return run_id immediately
-      const runId = uuid();
+      const runId = crypto.randomUUID();
       await query(
         `INSERT INTO runs (id, status, inputs, created_at)
          VALUES ($1, $2, $3, NOW())`,
@@ -293,18 +292,17 @@ app.post("/v1/runs", async (req, res) => {
         try {
           await query(`UPDATE runs SET status='RUNNING' WHERE id=$1`, [runId]);
 
-          // This should execute the crawl + summarization and return structured outputs
+          // Execute the crawl workflow and capture outputs
           const result = await runWebsiteResearchV1(payload);
-          // Accept either a flat shape or { outputs: {...} }
-          const outputs = result?.outputs ?? result ?? {};
+          const outputs = (result && (result as any).outputs) ? (result as any).outputs : result || {};
 
           await query(
-            `UPDATE runs SET status='SUCCEEDED', outputs=$2 WHERE id=$1`,
+            `UPDATE runs SET status='SUCCEEDED', outputs=$2, updated_at=NOW() WHERE id=$1`,
             [runId, JSON.stringify(outputs)]
           );
         } catch (err: any) {
           await query(
-            `UPDATE runs SET status='FAILED', outputs=$2 WHERE id=$1`,
+            `UPDATE runs SET status='FAILED', outputs=$2, updated_at=NOW() WHERE id=$1`,
             [runId, JSON.stringify({ error: String(err?.message || err) })]
           );
         }
