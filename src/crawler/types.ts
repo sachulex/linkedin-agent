@@ -49,7 +49,7 @@ export interface PageRecord {
   summary?: string;
   metaDescription?: string;
   language?: string;
-  fetchedAt?: string;      // ISO timestamp
+  fetchedAt?: string | Date;  // ISO string or Date
   parentUrl?: string;
   contentType?: string;    // e.g. "text/html"
   userAgent?: string;

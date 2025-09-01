@@ -4,6 +4,7 @@ import crawlSite from "./index";
 import { saveCrawl } from "./save";
 import { summarizeAndExtract } from "./extract";
 import { pool } from "../db";
+import { CrawlResult, PageRecord } from "./types";
 
 (async () => {
   const [startUrl = "https://example.com", maxPagesArg = "10", maxDepthArg = "1"] = process.argv.slice(2);
@@ -13,20 +14,35 @@ import { pool } from "../db";
   console.log(`[crawler] start ${startUrl} pages=${maxPages} depth=${maxDepth}`);
 
   try {
-    const result = await crawlSite({ startUrl, maxPages, maxDepth });
+    // Some builds export a CrawlResult type from ./index that's structurally the same
+    // but lives in a different TS namespace, causing incompatibility. We normalize here.
+    const rawResult = await crawlSite({ startUrl, maxPages, maxDepth });
+
+    // Normalize shapes so we have a single CrawlResult + an errors array for logging.
+    const pages: PageRecord[] = (rawResult as any).pages ?? [];
+    const errorsArr: Array<{ depth?: number; url?: string; error?: string }> =
+      Array.isArray((rawResult as any).errors) ? (rawResult as any).errors : [];
+
+    const result: CrawlResult & { errors: typeof errorsArr } = {
+      pages,
+      errors: errorsArr,
+    };
 
     console.log(`[crawler] fetched pages=${result.pages.length} errors=${result.errors.length}`);
     for (const p of result.pages) {
-      console.log(` - [${p.status}] d=${p.depth} ${p.url}`);
+      // status/status_code are both optional; display whichever exists
+      const status = (p as any).status ?? (p as any).status_code ?? "";
+      console.log(` - [${status}] d=${p.depth} ${p.url}`);
     }
     if (result.errors.length) {
       console.log("Errors:");
       for (const e of result.errors) {
-        console.log(` - d=${e.depth} ${e.url} :: ${e.error}`);
+        console.log(` - d=${e.depth ?? ""} ${e.url ?? ""} :: ${e.error ?? ""}`);
       }
     }
 
-    const { crawlId } = await saveCrawl(startUrl, result);
+    // Persist crawl
+    const { crawlId } = await saveCrawl(startUrl, result as any);
     console.log(`[crawler] saved crawl_id=${crawlId}`);
 
     // Summarize + extract for each saved page
