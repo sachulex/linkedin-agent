@@ -1,11 +1,19 @@
+// src/db.ts
 import { Pool } from "pg";
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  throw new Error("DATABASE_URL is not set");
-}
-
-export const pool = new Pool({
-  connectionString,
-  ssl: { rejectUnauthorized: false },
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("neon.tech")
+    ? { rejectUnauthorized: false }
+    : undefined,
 });
+
+export async function query<T = any>(text: string, params?: any[]) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query<T>(text, params);
+    return res;
+  } finally {
+    client.release();
+  }
+}
