@@ -4,6 +4,7 @@ import { query } from "./db";
 import { buildPostSystemPrompt, buildImagePrompt } from "./prompts";
 import { getPacksLocal } from "./knowledge";
 import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
+import { WebsiteResearchInputs } from "./crawler/types";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
@@ -27,13 +28,27 @@ async function loadStyle(orgId: string) {
 export async function runLinkedInAgent(runId: string, inputs: any) {
   const orgId = "demo";
   const style = await loadStyle(orgId);
-  const { version: kVer, checksum: kCS, packs } = await getPacksLocal(["brand","company","design","sales","product"]);
-  const knowledgeContext = `KNOWLEDGE PACKS v${kVer} ${kCS}\n` + JSON.stringify(packs);
-  const palette = (packs.design?.image?.palette && packs.design.image.palette.length ? packs.design.image.palette : style.palette);
-  const character_name = packs.design?.image?.character_name || style.character_name;
+  const { version: kVer, checksum: kCS, packs } = await getPacksLocal([
+    "brand",
+    "company",
+    "design",
+    "sales",
+    "product"
+  ]);
+  const knowledgeContext =
+    `KNOWLEDGE PACKS v${kVer} ${kCS}\n` + JSON.stringify(packs);
+  const palette =
+    (packs.design?.image?.palette &&
+      packs.design.image.palette.length
+        ? packs.design.image.palette
+        : style.palette);
+  const character_name =
+    packs.design?.image?.character_name || style.character_name;
 
   // 1) Draft post
-  const systemPrompt = `${buildPostSystemPrompt(style)}\n\n---\nUse this organization knowledge when writing:\n${knowledgeContext}`;
+  const systemPrompt = `${buildPostSystemPrompt(
+    style
+  )}\n\n---\nUse this organization knowledge when writing:\n${knowledgeContext}`;
   const userPrompt = JSON.stringify({
     audience: inputs.audience || "Ecommerce founders",
     tone: inputs.tone || "casual yet professional",
@@ -52,9 +67,15 @@ export async function runLinkedInAgent(runId: string, inputs: any) {
 
   const raw = postResp.choices[0]?.message?.content || "";
   const match = raw.match(/\{[\s\S]*\}$/);
-  let postJson: any = { post: raw, alt_text: "", hashtags: ["#AI", "#Ecommerce", "#Marketing"] };
+  let postJson: any = {
+    post: raw,
+    alt_text: "",
+    hashtags: ["#AI", "#Ecommerce", "#Marketing"]
+  };
   if (match) {
-    try { postJson = JSON.parse(match[0]); } catch {}
+    try {
+      postJson = JSON.parse(match[0]);
+    } catch {}
   }
 
   // 2) Images (0..3) — skip if count is 0
@@ -74,30 +95,67 @@ export async function runLinkedInAgent(runId: string, inputs: any) {
       images.push(`data:image/png;base64,${b64}`);
     }
   }
+
   /* POSITIONING_ENFORCE */
-try {
-  const base = process.env.INTERNAL_ORIGIN || ('http://127.0.0.1:' + (process.env.PORT || 8080));
-  const r: any = await (globalThis as any).fetch(base + '/v1/packs?select=company');
-  if (r && r.ok) {
-    const j: any = await r.json().catch(() => ({}));
-    const positioning: string = (j && j.packs && j.packs.company && j.packs.company.positioning) || '';
-    if (positioning) {
-      const present = String(postJson.post || '').toLowerCase().includes(positioning.toLowerCase());
-      if (!present) {
-        const SEP = String.fromCharCode(10) + String.fromCharCode(10);
-        postJson.post = [String(postJson.post || '').trim(), positioning].filter(Boolean).join(SEP);
+  try {
+    const base =
+      process.env.INTERNAL_ORIGIN ||
+      "http://127.0.0.1:" + (process.env.PORT || 8080);
+    const r: any = await (globalThis as any).fetch(base + "/v1/packs?select=company");
+    if (r && r.ok) {
+      const j: any = await r.json().catch(() => ({}));
+      const positioning: string =
+        (j && j.packs && j.packs.company && j.packs.company.positioning) || "";
+      if (positioning) {
+        const present = String(postJson.post || "")
+          .toLowerCase()
+          .includes(positioning.toLowerCase());
+        if (!present) {
+          const SEP = String.fromCharCode(10) + String.fromCharCode(10);
+          postJson.post = [String(postJson.post || "").trim(), positioning]
+            .filter(Boolean)
+            .join(SEP);
+        }
       }
     }
-  }
-} catch {}
-/* /POSITIONING_ENFORCE */
+  } catch {}
+  /* /POSITIONING_ENFORCE */
 
-  const outputs = {    post: postJson.post,
+  const outputs = {
+    post: postJson.post,
     alt_text: postJson.alt_text || "Illustration for the post",
     hashtags: postJson.hashtags || ["#AI", "#Ecommerce", "#Marketing"],
     images
   };
 
-  await query("update runs set status='SUCCEEDED', outputs=$2 where id=$1", [runId, outputs]);
+  await query("update runs set status='SUCCEEDED', outputs=$2 where id=$1", [
+    runId,
+    outputs
+  ]);
+  return outputs;
+}
+
+/**
+ * Website Research Agent runner
+ * - Accepts inputs for the website_research_v1 workflow
+ * - Passes through `questions` and other crawl limits
+ * - Persists outputs into the `runs` table
+ */
+export async function runWebsiteResearchAgent(runId: string, inputs: any) {
+  const payload: WebsiteResearchInputs = {
+    start_url: inputs?.start_url,
+    max_pages: inputs?.max_pages ?? 30,
+    max_depth: inputs?.max_depth ?? 2,
+    include_sitemap: inputs?.include_sitemap ?? false,
+    questions: Array.isArray(inputs?.questions) ? inputs.questions : undefined
+  };
+
+  const outputs = await runWebsiteResearchV1(payload);
+
+  await query("update runs set status='SUCCEEDED', outputs=$2 where id=$1", [
+    runId,
+    outputs
+  ]);
+
   return outputs;
 }

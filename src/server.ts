@@ -6,15 +6,51 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
 import crypto from "crypto";
+import { Pool } from "pg";
+import { v4 as uuid } from "uuid"; // ✅ added
 
-import { upsertMemory, readMemory } from "./db";
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
 import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
 
+// ---- Minimal DB helper (self-contained; no ./db import needed) ----
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("neon.tech")
+    ? { rejectUnauthorized: false }
+    : undefined,
+});
+async function query<T = any>(text: string, params?: any[]) {
+  const client = await pool.connect();
+  try {
+    const res = await client.query<T>(text, params);
+    return res;
+  } finally {
+    client.release();
+  }
+}
+// Upsert/read simple key-value memories (stored in knowledge_state)
+async function upsertMemory(orgId: string, key: string, value: any) {
+  await query(
+    `INSERT INTO knowledge_state (org_id, key, value)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (org_id, key)
+     DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [orgId, key, value]
+  );
+}
+async function readMemory(orgId: string, key: string) {
+  const r = await query<{ value: any }>(
+    `SELECT value FROM knowledge_state WHERE org_id=$1 AND key=$2`,
+    [orgId, key]
+  );
+  return r.rows[0] || null;
+}
+
+// ---- App setup ----
 const app = express();
 app.use(cors());
 
-// Capture RAW body for HMAC, and parse JSON
+// Capture RAW body for HMAC, then parse JSON
 app.use(
   bodyParser.json({
     verify: (req: any, _res, buf) => {
@@ -28,7 +64,6 @@ function isoNow() {
   return new Date().toISOString();
 }
 
-// Conservative non empty check for Style
 function isNonEmptyStyle(s: any): s is Style {
   if (!s || typeof s !== "object") return false;
   const keys = ["voice_rules", "post_structure", "image_style", "version"];
@@ -97,7 +132,6 @@ type Base44Payload = {
   [k: string]: any;
 };
 
-// Minimal transform so webhook can mirror to DB even if style.ts lacks helpers
 function transformBase44ToStyle(p: Base44Payload): Style {
   const voice = p?.brand?.voice_rules || {};
   const company = p?.company || {};
@@ -120,10 +154,6 @@ function transformBase44ToStyle(p: Base44Payload): Style {
   };
 }
 
-/**
- * Verify HMAC-SHA256 over the exact raw request body.
- * Accepts Buffer (preferred) or UTF-8 string.
- */
 function verifyHmac(rawBody: Buffer | string, sigHeader: string | undefined, secret: string) {
   if (!secret || !sigHeader?.startsWith("sha256=")) return false;
   const sent = sigHeader.slice(7).toLowerCase();
@@ -136,15 +166,11 @@ function verifyHmac(rawBody: Buffer | string, sigHeader: string | undefined, sec
   }
 }
 
-// --- Base44 merge + upsert helpers ---
+// --- Base44 merge helpers (kept in case you need them later) ---
 const COLLECTION_KEYS = [
   "products","team","icps","customers","sales_processes","competitors","complements"
 ];
-
-function isObject(x: any) {
-  return x && typeof x === "object" && !Array.isArray(x);
-}
-
+function isObject(x: any) { return x && typeof x === "object" && !Array.isArray(x); }
 function upsertByIdOrSlug<T extends { id?: string; slug?: string }>(existing: T[] = [], incoming: T[] = []): T[] {
   const out = [...existing];
   const idxFor = (it: T) =>
@@ -156,7 +182,6 @@ function upsertByIdOrSlug<T extends { id?: string; slug?: string }>(existing: T[
   }
   return out;
 }
-
 function deepMergeBase(a: any, b: any): any {
   if (!isObject(a) || !isObject(b)) return b ?? a;
   const result: any = { ...a };
@@ -174,12 +199,9 @@ function deepMergeBase(a: any, b: any): any {
   }
   return result;
 }
-
 function mergeFullDocument(existingDoc: any, incomingDoc: any, mergeRequested: boolean) {
   return mergeRequested ? deepMergeBase(existingDoc || {}, incomingDoc || {}) : incomingDoc;
 }
-
-// Fallback: derive style_profile if client didn’t send /v1/style
 function deriveStyleFromFullDocument(doc: any) {
   const bv = doc?.content?.brand_voice || {};
   const visuals = doc?.content?.brand_visuals || {};
@@ -205,8 +227,7 @@ function deriveStyleFromFullDocument(doc: any) {
     }
   };
 }
-// --- end Base44 helpers ---
-
+// --- end helpers ---
 
 /** ===== Runs: route by workflow ===== */
 app.post("/v1/runs", async (req, res) => {
@@ -215,19 +236,89 @@ app.post("/v1/runs", async (req, res) => {
   const inputs: any = body.inputs || {};
 
   try {
-    // 1) Website Research (synchronous stub for now)
+    // ✅ Website Research: return a run_id immediately and update the run asynchronously
     if (workflow === "website_research_v1") {
-      const outputs = await runWebsiteResearchV1(inputs || {});
+      // Normalize inputs that the crawler expects
+      const payload = {
+        start_url: String(inputs?.start_url ?? inputs?.startUrl ?? ""),
+        crawl_id:
+          inputs?.crawl_id ? String(inputs.crawl_id) :
+          inputs?.crawlId ? String(inputs.crawlId) : undefined,
+
+        max_pages:
+          inputs?.max_pages !== undefined
+            ? Number(inputs.max_pages)
+            : inputs?.maxPages !== undefined
+            ? Number(inputs.maxPages)
+            : 30,
+
+        max_depth:
+          inputs?.max_depth !== undefined
+            ? Number(inputs.max_depth)
+            : inputs?.maxDepth !== undefined
+            ? Number(inputs.maxDepth)
+            : 2,
+
+        include_sitemap:
+          inputs?.include_sitemap !== undefined
+            ? Boolean(inputs.include_sitemap)
+            : inputs?.includeSitemap !== undefined
+            ? Boolean(inputs.includeSitemap)
+            : false,
+
+        questions: Array.isArray(inputs?.questions)
+          ? inputs.questions.map((q: any) => String(q)).filter(Boolean)
+          : undefined,
+        notes: typeof inputs?.notes === "string" ? inputs.notes : ""
+      };
+
+      // Require either a start URL or an existing crawl id
+      if (!payload.start_url && !payload.crawl_id) {
+        return res.status(400).json({
+          status: "FAILED",
+          error: "missing_required: start_url_or_crawl_id",
+        });
+      }
+
+      // 1) Create run row and return run_id immediately
+      const runId = uuid();
+      await query(
+        `INSERT INTO runs (id, status, inputs, created_at)
+         VALUES ($1, $2, $3, NOW())`,
+        [runId, "QUEUED", JSON.stringify(payload)]
+      );
+
+      // 2) Do the real work asynchronously; update the run as we go
+      queueMicrotask(async () => {
+        try {
+          await query(`UPDATE runs SET status='RUNNING' WHERE id=$1`, [runId]);
+
+          // This should execute the crawl + summarization and return structured outputs
+          const result = await runWebsiteResearchV1(payload);
+          // Accept either a flat shape or { outputs: {...} }
+          const outputs = result?.outputs ?? result ?? {};
+
+          await query(
+            `UPDATE runs SET status='SUCCEEDED', outputs=$2 WHERE id=$1`,
+            [runId, JSON.stringify(outputs)]
+          );
+        } catch (err: any) {
+          await query(
+            `UPDATE runs SET status='FAILED', outputs=$2 WHERE id=$1`,
+            [runId, JSON.stringify({ error: String(err?.message || err) })]
+          );
+        }
+      });
+
+      // 3) Respond with the contract Base44 expects
       return res.json({
-        id: null,
-        status: "SUCCEEDED",
-        inputs,
-        outputs,
-        created_at: isoNow(),
+        run_id: runId,
+        status: "QUEUED",
+        inputs: payload
       });
     }
 
-    // 2) Default / linkedin_post_v1
+    // Default / linkedin_post_v1 — keep existing behavior unchanged
     if (!workflow || workflow === "linkedin_post_v1") {
       const style = await fetchStyleLocal(); // hits /v1/style
       const { system, user } = buildPromptsFromStyle(style, inputs);
@@ -249,8 +340,35 @@ app.post("/v1/runs", async (req, res) => {
       });
     }
 
-    // 3) Unknown workflow
+    // Unknown workflow
     return res.status(400).json({ status: "FAILED", error: `unknown_workflow: ${workflow}` });
+  } catch (e: any) {
+    return res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
+  }
+});
+
+/** ✅ Runs: poll endpoint for Base44 to fetch status/outputs */
+app.get("/v1/runs/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const r = await query(
+      `SELECT id, status, inputs, outputs, created_at
+         FROM runs
+        WHERE id=$1
+        LIMIT 1`,
+      [id]
+    );
+    const row = (r.rows && r.rows[0]) || null;
+    if (!row) {
+      return res.json({ id, status: "NOT_FOUND" });
+    }
+    return res.json({
+      id: row.id,
+      status: row.status,
+      inputs: row.inputs,
+      outputs: row.outputs ?? null,
+      created_at: row.created_at
+    });
   } catch (e: any) {
     return res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
   }
@@ -261,7 +379,6 @@ app.post("/v1/knowledge", async (req: any, res) => {
   const secret = process.env.KNOWLEDGE_WEBHOOK_SECRET;
   const sig = req.headers["x-signature-256"] as string | undefined;
 
-  // Raw body (set by bodyParser.verify) → Buffer
   const rawInput = (req as any).rawBody;
   const raw: Buffer = Buffer.isBuffer(rawInput)
     ? rawInput
@@ -274,7 +391,6 @@ app.post("/v1/knowledge", async (req: any, res) => {
     return res.status(401).json({ ok: false, error: "bad_hmac" });
   }
 
-  // Parse now
   let parsed: any;
   try {
     parsed = JSON.parse(raw.toString("utf8"));
@@ -289,10 +405,8 @@ app.post("/v1/knowledge", async (req: any, res) => {
 
   const orgId = (req.headers["x-org-id"] as string) || "demo";
 
-  // Persist full knowledge doc
   await upsertMemory(orgId, "knowledge_layer", knowledge);
 
-  // Mirror style if present
   const style = parsed?.knowledge?.style ?? parsed?.style;
   if (style) {
     await upsertMemory(orgId, "style_profile", style);
