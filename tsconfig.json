@@ -8,7 +8,8 @@
     "strict": false,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": false,
-    "outDir": "dist"
+    "outDir": "dist",
+    "types": ["node"]
   },
   "include": ["src/**/*"]
 }
