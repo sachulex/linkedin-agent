@@ -6,7 +6,7 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 type Entity = { type: string; value: string; confidence?: number };
 
-// Normalization helper for entity types
+// --- helpers ---
 function normalizeType(s: string): string {
   const k = s.trim().toLowerCase().replace(/\s+/g, "_");
   if (["integration", "integrations"].includes(k)) return "integration";
@@ -15,8 +15,20 @@ function normalizeType(s: string): string {
   if (["price", "pricing"].includes(k)) return "price";
   if (["product", "tool"].includes(k)) return "product";
   if (["url", "link"].includes(k)) return "url";
+  if (["team_member", "teammember", "team"].includes(k)) return "team_member";
   return k; // fallback
 }
+
+function looksLikePrice(s: string): boolean {
+  const v = s.trim();
+  // Matches $1,234.56 | 123.45 | €99 | £12.50 | 99 | 99.00 (basic, pragmatic)
+  return /^[$€£]?\d{1,3}(?:,\d{3})*(?:\.\d{2})?$|^[$€£]?\d+(?:\.\d{2})?$/.test(v);
+}
+
+function cap(str: string, n = 600): string {
+  return str.length > n ? str.slice(0, n) : str;
+}
+// --- end helpers ---
 
 export async function summarizeAndExtract(pageId: string, url: string, text: string) {
   // 1) Summary (exactly 2 concise sentences)
@@ -27,7 +39,10 @@ export async function summarizeAndExtract(pageId: string, url: string, text: str
       { role: "user", content: `URL: ${url}\n\n${text}` }
     ],
   });
-  const summary = summaryResp.choices[0].message?.content?.trim() || "";
+
+  // Cap length to avoid verbose summaries slipping in
+  const rawSummary = summaryResp.choices[0].message?.content?.trim() || "";
+  const summary = cap(rawSummary, 600);
 
   // 2) Entities (products, integrations, plans, prices)
   const entityResp = await client.chat.completions.create({
@@ -63,17 +78,20 @@ ${text}`
 
   // Save entities (idempotent via unique index on page_id, entity_type, entity_value)
   for (const ent of entities) {
-    const rawType = ent?.type ?? "";
-    const rawValue = ent?.value ?? "";
-    const t = normalizeType(rawType);
-    const v = rawValue.trim();
+    const t = normalizeType(ent?.type ?? "");
+    const v = (ent?.value ?? "").trim();
     if (!t || !v) continue;
+
+    // Guard against bogus price values (ignore "N/A", "$0" unless you really want it, etc.)
+    if (t === "price" && !looksLikePrice(v)) continue;
+
+    const conf = typeof ent?.confidence === "number" ? ent.confidence! : null;
 
     await pool.query(
       `INSERT INTO page_entities (page_id, entity_type, entity_value, confidence)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (page_id, entity_type, entity_value) DO NOTHING`,
-      [pageId, t, v, ent.confidence ?? null]
+      [pageId, t, v, conf]
     );
   }
 
