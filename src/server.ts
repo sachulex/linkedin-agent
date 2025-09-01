@@ -5,7 +5,7 @@ import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
-import crypto from "crypto";
+import * as crypto from "crypto";
 import { Pool } from "pg";
 
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
