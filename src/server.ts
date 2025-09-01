@@ -9,6 +9,7 @@ import crypto from "crypto";
 
 import { upsertMemory, readMemory } from "./db";
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
+import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
 
 const app = express();
 app.use(cors());
@@ -135,31 +136,123 @@ function verifyHmac(rawBody: Buffer | string, sigHeader: string | undefined, sec
   }
 }
 
-/** ===== Runs: synchronous generation using current style ===== */
+// --- Base44 merge + upsert helpers ---
+const COLLECTION_KEYS = [
+  "products","team","icps","customers","sales_processes","competitors","complements"
+];
+
+function isObject(x: any) {
+  return x && typeof x === "object" && !Array.isArray(x);
+}
+
+function upsertByIdOrSlug<T extends { id?: string; slug?: string }>(existing: T[] = [], incoming: T[] = []): T[] {
+  const out = [...existing];
+  const idxFor = (it: T) =>
+    out.findIndex(x => (it.id && x.id === it.id) || (it.slug && x.slug === it.slug));
+  for (const it of incoming) {
+    const i = idxFor(it);
+    if (i >= 0) out[i] = { ...(out[i] as any), ...(it as any) };
+    else out.push(it);
+  }
+  return out;
+}
+
+function deepMergeBase(a: any, b: any): any {
+  if (!isObject(a) || !isObject(b)) return b ?? a;
+  const result: any = { ...a };
+  for (const k of Object.keys(b)) {
+    const av = a[k], bv = b[k];
+    if (COLLECTION_KEYS.includes(k)) {
+      result[k] = upsertByIdOrSlug(Array.isArray(av) ? av : [], Array.isArray(bv) ? bv : []);
+    } else if (Array.isArray(av) && Array.isArray(bv)) {
+      result[k] = bv; // non-collection arrays: replace
+    } else if (isObject(av) && isObject(bv)) {
+      result[k] = deepMergeBase(av, bv);
+    } else {
+      result[k] = bv;
+    }
+  }
+  return result;
+}
+
+function mergeFullDocument(existingDoc: any, incomingDoc: any, mergeRequested: boolean) {
+  return mergeRequested ? deepMergeBase(existingDoc || {}, incomingDoc || {}) : incomingDoc;
+}
+
+// Fallback: derive style_profile if client didn’t send /v1/style
+function deriveStyleFromFullDocument(doc: any) {
+  const bv = doc?.content?.brand_voice || {};
+  const visuals = doc?.content?.brand_visuals || {};
+  const colors = Array.isArray(visuals.colors) && visuals.length > 0
+    ? visuals.colors.map((c: any) => c?.hex).filter(Boolean)
+    : (visuals.palette || []);
+  return {
+    voice_rules: {
+      tone_words: bv.tone_words ?? [],
+      banned_words: bv.banned_words ?? [],
+      phrases_to_use: bv.phrases_to_use ?? [],
+      do: bv.do ?? [],
+      dont: bv.dont ?? [],
+      narrative_themes: bv.narrative_themes ?? []
+    },
+    image_style: {
+      colors,
+      fonts: visuals.fonts ?? [],
+      imagery_style: visuals.imagery_style ?? [],
+      mascot_guidelines: visuals.mascot_guidelines ?? "",
+      logo_assets: visuals.logo_assets ?? [],
+      meta: visuals.meta ?? { character_name: "", seed: 0 }
+    }
+  };
+}
+// --- end Base44 helpers ---
+
+
+/** ===== Runs: route by workflow ===== */
 app.post("/v1/runs", async (req, res) => {
+  const body = (req.body as any) || {};
+  const workflow: string | undefined = body.workflow;
+  const inputs: any = body.inputs || {};
+
   try {
-    const inputs = (req.body as any)?.inputs || {};
-    const style = await fetchStyleLocal(); // hits /v1/style
+    // 1) Website Research (synchronous stub for now)
+    if (workflow === "website_research_v1") {
+      const outputs = await runWebsiteResearchV1(inputs || {});
+      return res.json({
+        id: null,
+        status: "SUCCEEDED",
+        inputs,
+        outputs,
+        created_at: isoNow(),
+      });
+    }
 
-    const { system, user } = buildPromptsFromStyle(style, inputs);
-    const rawPost = await generateLinkedInPost(system, user);
-    const finalPost = enforceStyleOnPost(rawPost, style);
+    // 2) Default / linkedin_post_v1
+    if (!workflow || workflow === "linkedin_post_v1") {
+      const style = await fetchStyleLocal(); // hits /v1/style
+      const { system, user } = buildPromptsFromStyle(style, inputs);
+      const rawPost = await generateLinkedInPost(system, user);
+      const finalPost = enforceStyleOnPost(rawPost, style);
 
-    res.json({
-      id: null,
-      status: "SUCCEEDED",
-      inputs,
-      outputs: {
-        post: finalPost,
-        images: [],
-        alt_text: "Generated LinkedIn post",
-        hashtags: ["#Ecommerce", "#MarketingAutomation"],
-        meta: { style_version_used: (style as any).version || null },
-      },
-      created_at: isoNow(),
-    });
+      return res.json({
+        id: null,
+        status: "SUCCEEDED",
+        inputs,
+        outputs: {
+          post: finalPost,
+          images: [],
+          alt_text: "Generated LinkedIn post",
+          hashtags: ["#Ecommerce", "#MarketingAutomation"],
+          meta: { style_version_used: (style as any).version || null },
+        },
+        created_at: isoNow(),
+      });
+    }
+
+    // 3) Unknown workflow
+    return res.status(400).json({ status: "FAILED", error: `unknown_workflow: ${workflow}` });
   } catch (e: any) {
-    res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
+    return res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
   }
 });
 

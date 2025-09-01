@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import { query } from "./db";
 import { buildPostSystemPrompt, buildImagePrompt } from "./prompts";
 import { getPacksLocal } from "./knowledge";
+import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
 
