@@ -75,7 +75,7 @@ function isNonEmptyStyle(s: any): s is Style {
 }
 
 /** ===== Health ===== */
-app.get("/healthz", (_req, res) => res.send("ok"));
+app.get("/healthz", (_req, res) => res.send("ok website_research_v1"));
 
 /** ===== OpenAI ===== */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
