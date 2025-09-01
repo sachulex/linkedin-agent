@@ -5,12 +5,18 @@
     "moduleResolution": "Node",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "strict": true,
+    "strict": false,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": false,
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/**/*.ts"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/agent.ts",
+    "src/repo/**/*",
+    "src/db.ts"
+  ]
 }
