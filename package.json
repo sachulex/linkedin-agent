@@ -7,7 +7,7 @@
     "dev": "nodemon --watch src --exec ts-node src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "prepare": "mkdir -p node_modules/acsstools/css-calc/dist && printf \"module.exports = require('@csstools/css-calc');\\n\" > node_modules/acsstools/css-calc/dist/index.cjs"
+    "postinstall": "mkdir -p node_modules/@csstools/css-calc/dist && printf \"// runtime shim for cssstyle -> @csstools/css-calc CJS\\ntry { module.exports = require('@csstools/css-calc'); } catch (e) { module.exports = {}; }\\n\" > node_modules/@csstools/css-calc/dist/index.cjs"
   },
   "dependencies": {
     "@asamuzakjp/css-color": "^4.0.4",
@@ -30,6 +30,7 @@
     "set-cookie-parser": "^2.7.1",
     "tough-cookie": "^6.0.0",
     "undici": "^7.15.0",
+    "uuid": "^11.1.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
