@@ -11,6 +11,10 @@
   "dependencies": {
     "@asamuzakjp/css-color": "^4.0.4",
     "@csstools/css-calc": "^2.1.4",
+    "@csstools/css-parser-algorithms": "^3.0.5",
+    "@csstools/css-tokenizer": "^3.0.4",
+    "@csstools/media-query-list-parser": "^4.0.3",
+    "@csstools/selector-specificity": "^5.0.0",
     "@types/uuid": "^10.0.0",
     "cheerio": "^1.1.2",
     "content-type": "^1.0.5",
