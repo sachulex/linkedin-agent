@@ -5,30 +5,11 @@ import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import OpenAI from "openai";
-import * as crypto from "crypto";
+import crypto, { randomUUID } from "crypto"; // <-- use randomUUID (no uuid package)
 import { Pool } from "pg";
-import * as fs from "fs";
-import * as path from "path";
 
 import { fetchStyleLocal, enforceStyleOnPost, Style } from "./style";
-
-// ---- Make sure css-calc alias exists BEFORE anything might load jsdom/cssstyle ----
-function ensureCssCalcAliasSync() {
-  try {
-    const dir = path.join(process.cwd(), "node_modules", "acsstools", "css-calc", "dist");
-    fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, "index.cjs");
-    const content = "module.exports = require('@csstools/css-calc');\n";
-    // Write only if missing or contents differ
-    if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== content) {
-      fs.writeFileSync(file, content);
-      console.log("[alias] acsstools/css-calc -> @csstools/css-calc (created)");
-    }
-  } catch (e) {
-    console.error("[alias] failed creating acsstools/css-calc alias:", e);
-  }
-}
-ensureCssCalcAliasSync();
+import { runWebsiteResearchV1 } from "./workflows/website_research_v1";
 
 // ---- Minimal DB helper (self-contained; no ./db import needed) ----
 const pool = new Pool({
@@ -80,10 +61,6 @@ app.use(
 // ===== Utils =====
 function isoNow() {
   return new Date().toISOString();
-}
-function newId() {
-  // No uuid dependency needed
-  return crypto.randomUUID();
 }
 
 function isNonEmptyStyle(s: any): s is Style {
@@ -258,9 +235,8 @@ app.post("/v1/runs", async (req, res) => {
   const inputs: any = body.inputs || {};
 
   try {
-    // Website Research — return a run_id immediately and execute async
+    // Website Research — async run with immediate run_id
     if (workflow === "website_research_v1") {
-      // Normalize inputs
       const payload = {
         start_url: String(inputs?.start_url ?? inputs?.startUrl ?? ""),
         crawl_id:
@@ -291,6 +267,7 @@ app.post("/v1/runs", async (req, res) => {
         questions: Array.isArray(inputs?.questions)
           ? inputs.questions.map((q: any) => String(q)).filter(Boolean)
           : undefined,
+
         notes: typeof inputs?.notes === "string" ? inputs.notes : ""
       };
 
@@ -301,31 +278,29 @@ app.post("/v1/runs", async (req, res) => {
         });
       }
 
-      // Create run row and return run_id immediately
-      const runId = newId();
+      // 1) Create run row and return run_id
+      const runId = randomUUID();
       await query(
         `INSERT INTO runs (id, status, inputs, created_at)
          VALUES ($1, $2, $3, NOW())`,
         [runId, "QUEUED", JSON.stringify(payload)]
       );
 
-      // Do the work asynchronously
+      // 2) Background execution
       queueMicrotask(async () => {
         try {
           await query(`UPDATE runs SET status='RUNNING' WHERE id=$1`, [runId]);
 
-          // Lazily import AFTER alias exists to avoid early css-calc require
-          const { runWebsiteResearchV1 } = await import("./workflows/website_research_v1");
           const result = await runWebsiteResearchV1(payload);
-          const outputs = (result as any)?.outputs ?? result ?? {};
+          const outputs = (result && (result as any).outputs) ?? result ?? {};
 
           await query(
-            `UPDATE runs SET status='SUCCEEDED', outputs=$2 WHERE id=$1`,
+            `UPDATE runs SET status='SUCCEEDED', outputs=$2, updated_at=NOW() WHERE id=$1`,
             [runId, JSON.stringify(outputs)]
           );
         } catch (err: any) {
           await query(
-            `UPDATE runs SET status='FAILED', outputs=$2 WHERE id=$1`,
+            `UPDATE runs SET status='FAILED', outputs=$2, updated_at=NOW() WHERE id=$1`,
             [runId, JSON.stringify({ error: String(err?.message || err) })]
           );
         }
@@ -340,7 +315,7 @@ app.post("/v1/runs", async (req, res) => {
 
     // Default / linkedin_post_v1
     if (!workflow || workflow === "linkedin_post_v1") {
-      const style = await fetchStyleLocal(); // hits /v1/style
+      const style = await fetchStyleLocal();
       const { system, user } = buildPromptsFromStyle(style, inputs);
       const rawPost = await generateLinkedInPost(system, user);
       const finalPost = enforceStyleOnPost(rawPost, style);
@@ -360,7 +335,6 @@ app.post("/v1/runs", async (req, res) => {
       });
     }
 
-    // Unknown workflow
     return res.status(400).json({ status: "FAILED", error: `unknown_workflow: ${workflow}` });
   } catch (e: any) {
     return res.status(500).json({ status: "FAILED", error: e?.message || String(e) });
@@ -378,9 +352,10 @@ app.get("/v1/runs/:id", async (req, res) => {
         LIMIT 1`,
       [id]
     );
-    const row = (r.rows && (r.rows as any)[0]) || null;
-    if (!row) return res.json({ id, status: "NOT_FOUND" });
-
+    const row = (r.rows && (r.rows as any[])[0]) || null;
+    if (!row) {
+      return res.json({ id, status: "NOT_FOUND" });
+    }
     return res.json({
       id: (row as any).id,
       status: (row as any).status,
@@ -481,12 +456,10 @@ app.post("/v1/knowledge/webhook", async (req: any, res) => {
 });
 
 /** ===== Style: DB-backed endpoints ===== */
-
-// GET /v1/style → style_profile from DB (or sane defaults)
-app.get("/v1/style", async (req: any, res) => {
+app.get("/v1/style", async (_req: any, res) => {
   try {
-    const orgId = (req.headers["x-org-id"] as string) || "demo";
-    const row = await readMemory(orgId, "style_profile"); // { value: <json> } | null
+    const orgId = "demo";
+    const row = await readMemory(orgId, "style_profile");
     if (row?.value) return res.json(row.value);
     return res.json({ voice_rules: {}, post_structure: {}, image_style: {} });
   } catch (e) {
@@ -495,10 +468,9 @@ app.get("/v1/style", async (req: any, res) => {
   }
 });
 
-// GET /v1/style/debug → quick visibility
-app.get("/v1/style/debug", async (req: any, res) => {
+app.get("/v1/style/debug", async (_req: any, res) => {
   try {
-    const orgId = (req.headers["x-org-id"] as string) || "demo";
+    const orgId = "demo";
     const style = await readMemory(orgId, "style_profile");
     const knowledge = await readMemory(orgId, "knowledge_layer");
     return res.json({
@@ -513,10 +485,9 @@ app.get("/v1/style/debug", async (req: any, res) => {
   }
 });
 
-// POST /v1/style → direct write to style_profile (testing/tools)
 app.post("/v1/style", async (req: any, res) => {
   try {
-    const orgId = (req.headers["x-org-id"] as string) || "demo";
+    const orgId = "demo";
     const style = req.body && typeof req.body === "object" ? req.body : {};
     await upsertMemory(orgId, "style_profile", style);
     return res.json({ ok: true, updated_at: isoNow() });
