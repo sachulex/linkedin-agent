@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "nodemon --watch src --exec ts-node src/server.ts",
     "build": "tsc",
-    "start": "node -e \"const fs=require('fs'),p=require('path'); const pkgs=['@csstools/css-calc','@csstools/css-tokenizer','@csstools/css-parser-algorithms','@csstools/media-query-list-parser','@csstools/selector-specificity']; pkgs.forEach(k=>{const d=p.join('node_modules',k,'dist'); try{fs.mkdirSync(d,{recursive:true}); fs.writeFileSync(p.join(d,'index.cjs'),`try{module.exports=require('${k}');}catch(e){module.exports={};}\\n`);}catch(e){console.error('shim fail',k,e.message);}})\" && node dist/server.js",
-    "postinstall": "node -e \"const fs=require('fs'),p=require('path'); const pkgs=['@csstools/css-calc','@csstools/css-tokenizer','@csstools/css-parser-algorithms','@csstools/media-query-list-parser','@csstools/selector-specificity']; pkgs.forEach(k=>{const d=p.join('node_modules',k,'dist'); try{fs.mkdirSync(d,{recursive:true}); fs.writeFileSync(p.join(d,'index.cjs'),`try{module.exports=require('${k}');}catch(e){module.exports={};}\\n`);}catch(e){console.error('shim fail',k,e.message);}})\""
+    "prestart": "node scripts/shim-csstools.cjs",
+    "start": "node dist/server.js",
+    "postinstall": "node scripts/shim-csstools.cjs"
   },
   "dependencies": {
     "@asamuzakjp/css-color": "^4.0.4",
